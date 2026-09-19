@@ -1,8 +1,25 @@
 diff --git a/cmd/ssh3-server.go b/cmd/ssh3-server.go
-index 3f9e2c7..44da22f 100644
+index 3f9e2c7..e153bf2 100644
 --- a/cmd/ssh3-server.go
 +++ b/cmd/ssh3-server.go
-@@ -541,12 +541,15 @@ func handleUDPForwardingChannel(ctx context.Context, user *unix_util.User, conv
+@@ -529,24 +529,24 @@ func newExitSignalReq(user *unix_util.User, channel ssh3.Channel, request ssh3Me
+ }
+ 
+ func handleUDPForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.UDPForwardingChannelImpl) error {
+-	// TODO: currently, the rights for socket creation are not checked. The socket is opened with the process's uid and gid
+-	// Not sure how to handled that in go since we cannot temporarily change the uid/gid without potentially impacting every
+-	// other goroutine
+-	conn, err := net.DialUDP("udp", nil, channel.RemoteAddr)
++	if user.Uid > uint64(^uint32(0)) {
++		return fmt.Errorf("authenticated uid %d exceeds helper protocol", user.Uid)
++	}
++	conn, err := dialIdentityUDP(uint32(user.Uid), channel.RemoteAddr)
+ 	if err != nil {
+-		return err
++		return fmt.Errorf("CMXsafe UDP identity socket: %w", err)
+ 	}
+ 	forwardUDPInBackground(ctx, channel, conn)
+ 	return nil
  }
  
  func handleTCPForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.TCPForwardingChannelImpl) error {
@@ -10,16 +27,13 @@ index 3f9e2c7..44da22f 100644
 -	// Not sure how to handled that in go since we cannot temporarily change the uid/gid without potentially impacting every
 -	// other goroutine
 -	conn, err := net.DialTCP("tcp", nil, channel.RemoteAddr)
-+	// Use the privilege-separation helper daemon to create the socket under
-+	// the authenticated user's UID/GID instead of the server process's root UID.
-+	genericConn, err := dialUID(uint32(user.Uid), uint32(user.Gid), channel.RemoteAddr)
++	if user.Uid > uint64(^uint32(0)) {
++		return fmt.Errorf("authenticated uid %d exceeds helper protocol", user.Uid)
++	}
++	conn, err := dialIdentityTCP(uint32(user.Uid), channel.RemoteAddr)
  	if err != nil {
 -		return err
-+		return fmt.Errorf("dialUID: %w", err)
-+	}
-+	conn, ok := genericConn.(*net.TCPConn)
-+	if !ok {
-+		return fmt.Errorf("dialUID: expected *net.TCPConn, got %T", genericConn)
++		return fmt.Errorf("CMXsafe TCP identity socket: %w", err)
  	}
  	forwardTCPInBackground(ctx, channel, conn)
  	return nil
