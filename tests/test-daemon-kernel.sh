@@ -22,6 +22,7 @@ cleanup() {
         fi
     done
     wait 2>/dev/null || true
+    nft delete table inet cmxsafe_helper_skuid 2>/dev/null || true
     nft delete table inet cmxsafe_helper_test 2>/dev/null || true
     ip -6 addr del fd00::10/128 dev lo 2>/dev/null || true
     ip -6 addr del fd00::20/128 dev lo 2>/dev/null || true
@@ -80,12 +81,92 @@ done
 
 python3 "$repo/tests/helper_client.py" tcp "$tmp_dir/helper.sock" "$identity_uid"
 python3 "$repo/tests/helper_client.py" udp "$tmp_dir/helper.sock" "$identity_uid"
+
+# Prove the UID Netfilter sees on every server-side port-forwarding socket.
+# Counters do not terminate evaluation; the following UID gates decide whether
+# traffic may leave the protected pool during this test.
+nft -f - <<NFT
+table inet cmxsafe_helper_skuid {
+    counter tcp_connect_seen {}
+    counter udp_connect_seen {}
+    counter tcp_listen_seen {}
+    counter tcp_accept_seen {}
+    counter udp_bind_seen {}
+    counter root_bypass_seen {}
+
+    chain output {
+        type filter hook output priority -10; policy accept;
+        ip6 saddr fd00::10 ip6 daddr fd00::20 tcp dport 18443 \
+            tcp flags & (syn | ack) == syn meta skuid $identity_uid counter name tcp_connect_seen
+        ip6 saddr fd00::10 ip6 daddr fd00::20 udp dport 15353 \
+            meta skuid $identity_uid counter name udp_connect_seen
+        ip6 saddr fd00::20 ip6 daddr fd00::10 tcp sport 19443 \
+            tcp flags & (syn | ack) == (syn | ack) \
+            meta skuid $service_uid counter name tcp_listen_seen
+        ip6 saddr fd00::20 ip6 daddr fd00::10 tcp sport 19443 \
+            tcp flags & psh == psh \
+            meta skuid $service_uid counter name tcp_accept_seen
+        ip6 saddr fd00::20 ip6 daddr fd00::10 udp sport 16353 \
+            meta skuid $service_uid counter name udp_bind_seen
+
+        ip6 saddr fd00::10 ip6 daddr fd00::20 tcp dport { 18443, 19443 } \
+            meta skuid $identity_uid accept
+        ip6 saddr fd00::20 ip6 daddr fd00::10 tcp sport { 18443, 19443 } \
+            meta skuid $service_uid accept
+        ip6 saddr fd00::10 ip6 daddr fd00::20 udp dport { 15353, 16353 } \
+            meta skuid $identity_uid accept
+        ip6 saddr fd00::20 ip6 daddr fd00::10 udp sport { 15353, 16353 } \
+            meta skuid $service_uid accept
+        meta skuid 0 ip6 saddr fd00::/16 counter name root_bypass_seen \
+            reject with icmpv6 type admin-prohibited
+        ip6 saddr fd00::/16 reject with icmpv6 type admin-prohibited
+    }
+}
+NFT
+
 CMXSAFE_HELPER_INTEGRATION=1 \
 CMXSAFE_HELPER_TEST_UID="$identity_uid" \
 CMXSAFE_HELPER_TEST_SERVICE_UID="$service_uid" \
 CMXSAFE_HELPER_TEST_SOCKET="$tmp_dir/helper.sock" \
     go test -run TestRealDaemonTCPAndUDP \
       "$repo/src/dial_uid.go" "$repo/src/dial_uid_integration_test.go"
+
+# A root-created socket using the same protected source address must not be
+# able to impersonate the authenticated forwarding identity.
+python3 - <<'PY'
+import socket
+
+connection = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+connection.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+connection.settimeout(1)
+connection.bind(("fd00::10", 0))
+try:
+    connection.connect(("fd00::20", 18443))
+except OSError:
+    pass
+else:
+    raise AssertionError("root-owned protected socket bypassed the skuid gate")
+finally:
+    connection.close()
+PY
+
+nft -j list table inet cmxsafe_helper_skuid | python3 -c '
+import json, sys
+required = {
+    "tcp_connect_seen", "udp_connect_seen", "tcp_listen_seen",
+    "tcp_accept_seen", "udp_bind_seen", "root_bypass_seen",
+}
+document = json.load(sys.stdin)
+counters = {
+    item["counter"]["name"]: item["counter"].get("packets", 0)
+    for item in document["nftables"] if "counter" in item
+}
+missing = sorted(name for name in required if counters.get(name, 0) < 1)
+if missing:
+    raise SystemExit(f"Netfilter did not observe expected socket UIDs: {missing}; {counters}")
+'
+nft delete table inet cmxsafe_helper_skuid
+
 python3 "$repo/tests/helper_client.py" invalid-identity "$tmp_dir/helper.sock"
 python3 "$repo/tests/helper_client.py" malformed "$tmp_dir/helper.sock"
 python3 "$repo/tests/helper_client.py" invalid-packets "$tmp_dir/helper.sock"

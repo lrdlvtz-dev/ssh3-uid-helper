@@ -124,30 +124,33 @@ root and is additionally checked as UID 0 by the daemon.
 The patch is pinned and tested against:
 
 ```text
-francoismichel/ssh3@5b4b242db02a5cfbb9ebf9dfc5aad2c32e10f245
+francoismichel/ssh3@c5d8de70b5327145858b984db54948a82fdbeb0a
+(pull request #166: direct and reverse TCP/UDP forwarding)
 ```
 
 ```bash
 git clone https://github.com/francoismichel/ssh3.git
 cd ssh3
-git checkout 5b4b242db02a5cfbb9ebf9dfc5aad2c32e10f245
+git fetch origin pull/166/head
+git checkout FETCH_HEAD
+test "$(git rev-parse HEAD)" = c5d8de70b5327145858b984db54948a82fdbeb0a
 git apply ../ssh3-uid-helper/ssh3-uid-helper.patch
 cp ../ssh3-uid-helper/src/dial_uid.go cmd/
 go test ./cmd/ssh3-server
 ```
 
-Both forwarding handlers use the authenticated `unix_util.User.Uid`. TCP and
-UDP are separate helper operations and therefore remain separate Security
-Context transports. There is no root-owned fallback: a helper error fails the
-forwarding channel closed. The same Go client exposes `listenIdentityTCP` and
-`bindIdentityUDP` for gateway components that publish a protected service.
+All server-side SSH3 port-forwarding sockets use the authenticated
+`unix_util.User.Uid`. Direct TCP/UDP forwarding uses `CONNECT_TCP` and
+`CONNECT_UDP`; reverse TCP uses `LISTEN_TCP` plus one `TCP_ACCEPT` per accepted
+connection; reverse UDP uses `UDP_BIND`. A reverse bind must name the canonical
+IPv6 of the authenticated identity. Wildcard, IPv4, loopback, multicast and a
+different user's IPv6 are rejected. There is no root-owned fallback: a helper
+error fails the forwarding setup or data channel closed.
 
-The pinned SSH3 revision implements client-initiated outbound TCP/UDP
-forwarding only; it has no server-side protected-service listener to patch.
-Consequently the SSH3 patch consumes the two connect operations, while gateway
-service components must consume the listener/bind API when they are integrated.
-Opening such a service socket directly remains outside this repository's
-enforcement reach and is a deployment error.
+Only the server-side sockets inside the CMXsafe gateway use this helper. The
+client-side listener for direct forwarding and client-side target connection
+for reverse forwarding remain on the SSH3 client machine and are outside the
+gateway identity boundary.
 
 Only IP sockets that represent a CMXsafe identity belong to this contract.
 The pre-authentication SSH3 HTTPS/QUIC endpoint, Unix IPC and SSH-agent Unix
@@ -166,13 +169,16 @@ The permanent suite contains:
   UID/GID protocol and IPv4 socket family;
 - a disposable privileged-container test that creates canonical client and
   service accounts and proves real TCP/UDP connects, TCP listen, UDP bind,
-  canonical IPv6 endpoints and socket UID;
+  canonical IPv6 endpoints and the UID observed by Netfilter;
+- a live patched-SSH3 E2E that moves traffic through direct and reverse TCP
+  and UDP port forwardings while every server-side socket uses the helper;
 - malformed request, invalid identity, slow-client and worker-saturation
   negative tests, including forged listener descriptors;
 - a clean checkout test that applies the patch and compiles the pinned SSH3
   server.
 
-Run the kernel test without changing host accounts:
+Run the kernel and live SSH3 forwarding E2E tests without changing host
+accounts:
 
 ```bash
 docker build -t cmxsafe-ssh3-helper-test -f tests/Dockerfile .
