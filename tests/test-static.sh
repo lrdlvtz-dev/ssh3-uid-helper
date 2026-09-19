@@ -27,6 +27,10 @@ grep -Fq 'kAcceptTcp = 5' "$repo/src/protocol.h"
 grep -Fq 'listenIdentityTCP' "$repo/src/dial_uid.go"
 grep -Fq 'bindIdentityUDP' "$repo/src/dial_uid.go"
 grep -Fq 'accept_identity_socket' "$repo/src/helper_daemon_v2.cpp"
+grep -Fq 'c5d8de70b5327145858b984db54948a82fdbeb0a' "$repo/tests/test-ssh3-integration.sh"
+[ -x "$repo/tests/check_ssh3_forwarding.py" ]
+[ -x "$repo/tests/test-ssh3-forwarding-e2e.sh" ]
+grep -Fq 'test-ssh3-forwarding-e2e.sh' "$repo/tests/Dockerfile"
 [ ! -e "$repo/tests/echo_servers.py" ]
 
 if grep -Fq '/tmp/ssh3-helper.sock' "$repo/src/helper_daemon_v2.cpp" "$repo/src/dial_uid.go"; then

@@ -1,10 +1,7 @@
 diff --git a/cmd/ssh3-server.go b/cmd/ssh3-server.go
-index 3f9e2c7..e153bf2 100644
 --- a/cmd/ssh3-server.go
 +++ b/cmd/ssh3-server.go
-@@ -529,24 +529,24 @@ func newExitSignalReq(user *unix_util.User, channel ssh3.Channel, request ssh3Me
- }
- 
+@@ -615,11 +615,11 @@
  func handleUDPForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.UDPForwardingChannelImpl) error {
 -	// TODO: currently, the rights for socket creation are not checked. The socket is opened with the process's uid and gid
 -	// Not sure how to handled that in go since we cannot temporarily change the uid/gid without potentially impacting every
@@ -21,7 +18,7 @@ index 3f9e2c7..e153bf2 100644
  	forwardUDPInBackground(ctx, channel, conn)
  	return nil
  }
- 
+@@ -627,11 +627,11 @@
  func handleTCPForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.TCPForwardingChannelImpl) error {
 -	// TODO: currently, the rights for socket creation are not checked. The socket is opened with the process's uid and gid
 -	// Not sure how to handled that in go since we cannot temporarily change the uid/gid without potentially impacting every
@@ -37,3 +34,85 @@ index 3f9e2c7..e153bf2 100644
  	}
  	forwardTCPInBackground(ctx, channel, conn)
  	return nil
+ }
+@@ -659,4 +659,10 @@
+ func handleTCPReverseForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.TCPReverseForwardingChannelImpl) error {
+-	conn, err := net.ListenTCP("tcp", channel.LocalAddr)
++	if user.Uid > uint64(^uint32(0)) {
++		err := fmt.Errorf("authenticated uid %d exceeds helper protocol", user.Uid)
++		_ = writeReverseSetupAck(channel, ssh3.ReverseSetupAckFail, err.Error())
++		channel.Close()
++		return err
++	}
++	conn, err := listenIdentityTCP(uint32(user.Uid), channel.LocalAddr)
+ 	if err != nil {
+ 		log.Error().Msgf("could not listen on TCP %s: %s", channel.LocalAddr, err)
+@@ -681,19 +687,28 @@
+ 	}
+ 
++	go func() {
++		<-ctx.Done()
++		conn.Close()
++	}()
++
+ 	go func() {
+ 		for {
+ 			conn, err := conn.AcceptTCP()
+ 			if err != nil {
++				if ctx.Err() != nil {
++					return
++				}
+ 				log.Error().Msgf("could not accept on TCP listener %s: %s", channel.LocalAddr, err)
+ 				return
+ 			}
+ 
+ 			forwardingChannel, err := conv.OpenTCPReverseForwardingChannel(30000, 10, channel.LocalAddr)
+ 			if err != nil {
++				conn.Close()
+ 				log.Error().Msgf("could not open new TCP reverse forwarding channel: %s", err)
+ 				return
+ 			}
+ 			forwardReverseTCPInBackground(ctx, forwardingChannel, conn)
+ 		}
+ 	}()
+ 	return nil
+@@ -893,5 +899,10 @@
+ func handleUDPReverseForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, ch *ssh3.UDPReverseForwardingChannelImpl) error {
+-	conn, err := ListenUDPWithAutoMulticast(ch.LocalAddr,"")
+-	//conn, err := net.ListenUDP("udp", ch.LocalAddr)
++	if user.Uid > uint64(^uint32(0)) {
++		err := fmt.Errorf("authenticated uid %d exceeds helper protocol", user.Uid)
++		_ = writeReverseSetupAck(ch, ssh3.ReverseSetupAckFail, err.Error())
++		ch.Close()
++		return err
++	}
++	conn, err := bindIdentityUDP(uint32(user.Uid), ch.LocalAddr)
+ 	if err != nil {
+ 		log.Error().Msgf("could not listen on UDP %s: %s", ch.LocalAddr, err)
+@@ -902,18 +913,26 @@
+ 	if ackErr := writeReverseSetupAck(ch, ssh3.ReverseSetupAckOK, ""); ackErr != nil {
+ 		// See handleTCPReverseForwardingChannel for the rationale: a
+ 		// successful Listen followed by a failed ack write must not
+ 		// leave the listener bound on this side.
+ 		log.Error().Msgf("reverse UDP %s: ack write failed, closing orphan listener: %s", ch.LocalAddr, ackErr)
+ 		conn.Close()
+ 		ch.Close()
+ 		return ackErr
+ 	}
++	go func() {
++		<-ctx.Done()
++		conn.Close()
++	}()
++
+ 	forwardings := make(map[string]ssh3.Channel)
+ 	go func() {
+ 		buf := make([]byte, 1500)
+ 		for {
+ 			n, addr, err := conn.ReadFromUDP(buf)
+ 			if err != nil {
++				if ctx.Err() != nil {
++					return
++				}
+ 				log.Error().Msgf("could not read on UDP socket: %s", err)
+ 				return
+ 			}

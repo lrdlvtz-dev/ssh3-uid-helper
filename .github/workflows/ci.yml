@@ -29,7 +29,9 @@ jobs:
         run: |
           sh tests/test-static.sh
           shellcheck tests/*.sh
-          python3 -m py_compile tests/helper_client.py tests/helper_services.py
+          python3 -m py_compile tests/helper_client.py tests/helper_services.py \
+            tests/check_ssh3_forwarding.py tests/forwarding_echo.py \
+            tests/forwarding_probe.py
       - name: Compile pinned SSH3 integration
         run: ./tests/test-ssh3-integration.sh
       - name: Kernel and nftables integration

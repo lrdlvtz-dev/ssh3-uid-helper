@@ -530,11 +530,18 @@ func (listener *identityTCPListener) SyscallConn() (syscall.RawConn, error) {
 	return listener.listener.SyscallConn()
 }
 
-func listenIdentityTCP(uid uint32, port int) (*identityTCPListener, error) {
+func listenIdentityTCP(uid uint32, requested *net.TCPAddr) (*identityTCPListener, error) {
+	if requested == nil || requested.Zone != "" {
+		return nil, errors.New("TCP service bind must be an unscoped canonical IPv6 address")
+	}
 	source, err := canonicalIPv6ForUID(uid)
 	if err != nil {
 		return nil, err
 	}
+	if !requested.IP.Equal(source) {
+		return nil, fmt.Errorf("TCP service bind address %s does not match authenticated identity %s", requested.IP, source)
+	}
+	port := requested.Port
 	request, requestID, _, err := buildHelperServiceRequest(uid, "tcp6", port)
 	if err != nil {
 		return nil, err
@@ -570,11 +577,18 @@ func listenIdentityTCP(uid uint32, port int) (*identityTCPListener, error) {
 	return &identityTCPListener{uid: uid, port: port, source: source, listener: tcp}, nil
 }
 
-func bindIdentityUDP(uid uint32, port int) (*net.UDPConn, error) {
+func bindIdentityUDP(uid uint32, requested *net.UDPAddr) (*net.UDPConn, error) {
+	if requested == nil || requested.Zone != "" {
+		return nil, errors.New("UDP service bind must be an unscoped canonical IPv6 address")
+	}
 	source, err := canonicalIPv6ForUID(uid)
 	if err != nil {
 		return nil, err
 	}
+	if !requested.IP.Equal(source) {
+		return nil, fmt.Errorf("UDP service bind address %s does not match authenticated identity %s", requested.IP, source)
+	}
+	port := requested.Port
 	request, requestID, _, err := buildHelperServiceRequest(uid, "udp6", port)
 	if err != nil {
 		return nil, err

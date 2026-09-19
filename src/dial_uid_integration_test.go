@@ -46,8 +46,20 @@ func TestRealDaemonTCPAndUDP(t *testing.T) {
 		t.Fatal(err)
 	}
 	serviceUID := uint32(serviceUID64)
+	if _, err := listenIdentityTCP(serviceUID, &net.TCPAddr{
+		IP: net.ParseIP("fd00::10"), Port: 19443,
+	}); err == nil {
+		t.Fatal("TCP reverse forwarding accepted a bind address from another identity")
+	}
+	if _, err := bindIdentityUDP(serviceUID, &net.UDPAddr{
+		IP: net.IPv6unspecified, Port: 16353,
+	}); err == nil {
+		t.Fatal("UDP reverse forwarding accepted a wildcard bind address")
+	}
 
-	tcpListener, err := listenIdentityTCP(serviceUID, 19443)
+	tcpListener, err := listenIdentityTCP(serviceUID, &net.TCPAddr{
+		IP: net.ParseIP("fd00::20"), Port: 19443,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +81,9 @@ func TestRealDaemonTCPAndUDP(t *testing.T) {
 		tcpServiceDone <- readErr
 	}()
 
-	udpService, err := bindIdentityUDP(serviceUID, 16353)
+	udpService, err := bindIdentityUDP(serviceUID, &net.UDPAddr{
+		IP: net.ParseIP("fd00::20"), Port: 16353,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
