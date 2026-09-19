@@ -1,0 +1,38 @@
+[Unit]
+Description=CMXsafe SSH3 identity socket helper
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=ssh3-helper
+RuntimeDirectory=ssh3-helper
+RuntimeDirectoryMode=0750
+ExecStart=/usr/libexec/cmxsafe-ssh3-helper --socket /run/ssh3-helper/helper.sock --socket-group ssh3-helper --allowed-uid 0
+Restart=on-failure
+RestartSec=1s
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+LimitNPROC=128
+LimitNOFILE=256
+
+[Install]
+WantedBy=multi-user.target
