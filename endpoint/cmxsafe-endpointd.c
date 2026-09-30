@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <linux/if_link.h>
 #include <linux/netlink.h>
@@ -30,11 +31,13 @@
 #define MAX_LEASES 4096U
 #define MAX_PEER_LEASES 128U
 #define IO_TIMEOUT_SECONDS 5
+#define MAX_LEASE_ID 32
 
 typedef struct Lease Lease;
 struct Lease {
     char address[INET6_ADDRSTRLEN];
     char scope[8];
+    char lease_id[MAX_LEASE_ID + 1];
     pid_t pid;
     uid_t uid;
     gid_t gid;
@@ -82,6 +85,14 @@ static bool valid_scope(const char *scope) {
     return strcmp(scope, "peer") == 0 || strcmp(scope, "self") == 0;
 }
 
+static bool valid_lease_id(const char *lease_id) {
+    size_t length = strlen(lease_id);
+    if (length == 0 || length > MAX_LEASE_ID) return false;
+    for (size_t i = 0; i < length; ++i)
+        if (!isxdigit((unsigned char)lease_id[i])) return false;
+    return true;
+}
+
 static bool normalise_ipv6(const char *input, char output[INET6_ADDRSTRLEN]) {
     struct in6_addr address;
     return inet_pton(AF_INET6, input, &address) == 1 &&
@@ -125,10 +136,11 @@ static int process_starttime(pid_t pid, unsigned long long *result) {
 }
 
 static bool same_owner(const Lease *lease, const struct ucred *cred,
-                       unsigned long long starttime, const char *scope) {
+                       unsigned long long starttime, const char *scope,
+                       const char *lease_id) {
     return lease->pid == cred->pid && lease->uid == cred->uid &&
            lease->gid == cred->gid && lease->starttime == starttime &&
-           strcmp(lease->scope, scope) == 0;
+           strcmp(lease->scope, scope) == 0 && strcmp(lease->lease_id, lease_id) == 0;
 }
 
 static bool owner_alive(const Lease *lease) {
@@ -280,21 +292,21 @@ static size_t peer_refs(const State *state, const struct ucred *cred,
 
 static Lease *find_lease(State *state, const struct ucred *cred,
                          unsigned long long starttime, const char *scope,
-                         const char *address) {
+                         const char *lease_id, const char *address) {
     for (Lease *l = state->leases; l; l = l->next)
-        if (same_owner(l, cred, starttime, scope) && strcmp(l->address, address) == 0) return l;
+        if (same_owner(l, cred, starttime, scope, lease_id) && strcmp(l->address, address) == 0) return l;
     return NULL;
 }
 
 static void ensure_address(State *state, int fd, const struct ucred *cred,
                            unsigned long long starttime, const char *scope,
-                           const char *address) {
-    Lease *existing = find_lease(state, cred, starttime, scope, address);
+                           const char *lease_id, const char *address) {
+    Lease *existing = find_lease(state, cred, starttime, scope, lease_id, address);
     if (existing) {
         char out[192];
         (void)snprintf(out, sizeof(out),
-            "{\"version\":1,\"ok\":true,\"created\":false,\"scope\":\"%s\",\"ipv6\":\"%s\",\"refcount\":%zu}\n",
-            scope, address, address_refs(state, address));
+            "{\"version\":1,\"ok\":true,\"created\":false,\"scope\":\"%s\",\"lease_id\":\"%s\",\"ipv6\":\"%s\",\"refcount\":%zu}\n",
+            scope, lease_id, address, address_refs(state, address));
         (void)write_all(fd, out);
         return;
     }
@@ -304,6 +316,7 @@ static void ensure_address(State *state, int fd, const struct ucred *cred,
     if (!lease) { reply_error(fd, "out_of_memory"); return; }
     (void)snprintf(lease->address, sizeof(lease->address), "%s", address);
     (void)snprintf(lease->scope, sizeof(lease->scope), "%s", scope);
+    (void)snprintf(lease->lease_id, sizeof(lease->lease_id), "%s", lease_id);
     lease->pid = cred->pid; lease->uid = cred->uid; lease->gid = cred->gid;
     lease->starttime = starttime;
 
@@ -320,16 +333,16 @@ static void ensure_address(State *state, int fd, const struct ucred *cred,
     ++state->lease_count;
     char out[192];
     (void)snprintf(out, sizeof(out),
-        "{\"version\":1,\"ok\":true,\"created\":true,\"scope\":\"%s\",\"ipv6\":\"%s\",\"refcount\":%zu}\n",
-        scope, address, address_refs(state, address));
+        "{\"version\":1,\"ok\":true,\"created\":true,\"scope\":\"%s\",\"lease_id\":\"%s\",\"ipv6\":\"%s\",\"refcount\":%zu}\n",
+        scope, lease_id, address, address_refs(state, address));
     (void)write_all(fd, out);
 }
 
 static void release_address(State *state, int fd, const struct ucred *cred,
                             unsigned long long starttime, const char *scope,
-                            const char *address) {
+                            const char *lease_id, const char *address) {
     Lease **cursor = &state->leases;
-    while (*cursor && !(same_owner(*cursor, cred, starttime, scope) &&
+    while (*cursor && !(same_owner(*cursor, cred, starttime, scope, lease_id) &&
                         strcmp((*cursor)->address, address) == 0)) cursor = &(*cursor)->next;
     if (!*cursor) { reply_error(fd, "not_owner"); return; }
     size_t refs = address_refs(state, address);
@@ -343,8 +356,8 @@ static void release_address(State *state, int fd, const struct ucred *cred,
     --state->lease_count;
     char out[192];
     (void)snprintf(out, sizeof(out),
-        "{\"version\":1,\"ok\":true,\"released\":true,\"scope\":\"%s\",\"ipv6\":\"%s\",\"refcount\":%zu}\n",
-        scope, address, refs - 1);
+        "{\"version\":1,\"ok\":true,\"released\":true,\"scope\":\"%s\",\"lease_id\":\"%s\",\"ipv6\":\"%s\",\"refcount\":%zu}\n",
+        scope, lease_id, address, refs - 1);
     (void)write_all(fd, out);
 }
 
@@ -393,26 +406,26 @@ static void handle_client(State *state, int fd) {
     int frame = read_frame(fd, line);
     if (frame != 0) { reply_error(fd, frame == -4 ? "frame_too_large" : "invalid_frame"); return; }
 
-    char *parts[5] = {0};
+    char *parts[6] = {0};
     size_t count = 0;
     char *save = NULL;
-    for (char *p = strtok_r(line, " \t", &save); p && count < 5; p = strtok_r(NULL, " \t", &save))
+    for (char *p = strtok_r(line, " \t", &save); p && count < 6; p = strtok_r(NULL, " \t", &save))
         parts[count++] = p;
     size_t offset = count > 0 && strcmp(parts[0], "v1") == 0 ? 1U : 0U;
     if (count == offset + 1 && strcmp(parts[offset], "ping") == 0) {
         (void)write_all(fd, "{\"version\":1,\"ok\":true}\n"); return;
     }
-    if (count != offset + 3 ||
+    if (count != offset + 4 ||
         (strcmp(parts[offset], "ensure") != 0 && strcmp(parts[offset], "release") != 0) ||
-        !valid_scope(parts[offset + 1])) {
+        !valid_scope(parts[offset + 1]) || !valid_lease_id(parts[offset + 2])) {
         reply_error(fd, "invalid_request"); return;
     }
     char address[INET6_ADDRSTRLEN];
-    if (!normalise_ipv6(parts[offset + 2], address)) { reply_error(fd, "invalid_ipv6"); return; }
+    if (!normalise_ipv6(parts[offset + 3], address)) { reply_error(fd, "invalid_ipv6"); return; }
     if (strcmp(parts[offset], "ensure") == 0)
-        ensure_address(state, fd, &cred, starttime, parts[offset + 1], address);
+        ensure_address(state, fd, &cred, starttime, parts[offset + 1], parts[offset + 2], address);
     else
-        release_address(state, fd, &cred, starttime, parts[offset + 1], address);
+        release_address(state, fd, &cred, starttime, parts[offset + 1], parts[offset + 2], address);
 }
 
 static int safe_socket_path(const char *path) {

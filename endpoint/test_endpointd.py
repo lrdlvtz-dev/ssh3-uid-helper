@@ -36,26 +36,28 @@ def main():
                     raise RuntimeError(daemon.stderr.read().decode())
                 time.sleep(0.01)
             assert request(path, "v1 ping")["ok"] is True
-            first = request(path, "v1\tensure\tpeer\t2001:0db8::1")
+            first = request(path, "v1\tensure\tpeer\t01\t2001:0db8::1")
             assert first == {"version": 1, "ok": True, "created": True,
-                             "scope": "peer", "ipv6": "2001:db8::1", "refcount": 1}
-            again = request(path, "ensure peer 2001:db8::1")
+                             "scope": "peer", "lease_id": "01",
+                             "ipv6": "2001:db8::1", "refcount": 1}
+            again = request(path, "ensure peer 01 2001:db8::1")
             assert again["ok"] and not again["created"] and again["refcount"] == 1
-            # Scope is part of the lease key, not merely metadata.
-            other_scope = request(path, "ensure self 2001:db8::1")
-            assert other_scope["ok"] and other_scope["refcount"] == 2
-            released = request(path, "v1\trelease\tpeer\t2001:db8::1")
+            # A second channel in the same process gets an independent lease.
+            second = request(path, "v1 ensure peer 02 2001:db8::1")
+            assert second["ok"] and second["created"] and second["refcount"] == 2
+            released = request(path, "v1\trelease\tpeer\t01\t2001:db8::1")
             assert released["ok"] and released["released"] and released["refcount"] == 1
-            assert request(path, "release peer 2001:db8::1")["error"] == "not_owner"
-            assert request(path, "release self 2001:db8::1")["refcount"] == 0
-            assert request(path, "ensure peer not-an-ip")["error"] == "invalid_ipv6"
+            assert request(path, "release peer 01 2001:db8::1")["error"] == "not_owner"
+            assert request(path, "release peer 02 2001:db8::1")["refcount"] == 0
+            assert request(path, "ensure peer 03 not-an-ip")["error"] == "invalid_ipv6"
+            assert request(path, "ensure peer not_hex! 2001:db8::1")["error"] == "invalid_request"
 
             # A distinct process cannot release this process's lease (SO_PEERCRED authority).
-            assert request(path, "ensure peer 2001:db8::2")["ok"]
+            assert request(path, "ensure peer aa 2001:db8::2")["ok"]
             code = """
 import json,socket,sys
 s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1])
-s.sendall(b'release peer 2001:db8::2\\n')
+s.sendall(b'release peer aa 2001:db8::2\\n')
 print(s.recv(4096).decode(), end='')
 """
             child = subprocess.check_output([sys.executable, "-c", code, path], text=True)

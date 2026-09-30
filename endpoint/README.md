@@ -7,10 +7,11 @@ on a daemon-owned dummy interface. It is intentionally small and Linux-only.
 ## Security model
 
 The Unix peer identity (`PID`, `UID`, and `GID`) comes exclusively from
-`SO_PEERCRED`; the protocol has no caller-supplied owner field. PID reuse is
+`SO_PEERCRED`; the protocol has no caller-supplied process owner field. PID reuse is
 prevented from inheriting leases by also recording field 22 (`starttime`) from
-`/proc/PID/stat`. A release succeeds only for the same peer identity and scope
-that created the lease.
+`/proc/PID/stat`. The caller supplies a short hexadecimal channel `lease_id` so
+concurrent channels in one process have independent references. A release
+succeeds only for the same peer identity, scope, and lease ID that created it.
 
 The daemon creates its dedicated dummy interface with `NLM_F_EXCL` and refuses
 to adopt a pre-existing interface. Likewise, an address that already exists
@@ -32,14 +33,15 @@ Requests are ASCII and newline terminated:
 
 ```
 v1<TAB>ping
-v1<TAB>ensure<TAB>peer<TAB>2001:db8::10
-v1<TAB>release<TAB>peer<TAB>2001:db8::10
+v1<TAB>ensure<TAB>peer<TAB>01a2<TAB>2001:db8::10
+v1<TAB>release<TAB>peer<TAB>01a2<TAB>2001:db8::10
 ```
 
 `<TAB>` above denotes one literal tab byte. Space separators and omission of
 the `v1` prefix are also accepted for compatibility with older clients. Scope
 is either `peer` (the remote Identity Socket address mirrored locally) or
-`self`; leases in the two scopes are distinct. Responses are single-line JSON
+`self`; leases in the two scopes are distinct. `lease_id` is 1–32 hexadecimal
+characters. Responses are single-line JSON
 objects with `"version":1` and `"ok":true|false`. An unauthorized release
 returns `{"version":1,"ok":false,"error":"not_owner"}`.
 

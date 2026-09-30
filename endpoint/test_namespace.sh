@@ -28,10 +28,10 @@ def call(command):
     data = b""
     while not data.endswith(b"\n"): data += s.recv(4096)
     s.close(); return json.loads(data)
-assert call(b"v1\tensure\tpeer\t2001:db8::99")["ok"]
+assert call(b"v1\tensure\tpeer\t01\t2001:db8::99")["ok"]
 open(ready, "w").close()
 while not os.path.exists(release): time.sleep(.01)
-assert call(b"v1\trelease\tpeer\t2001:db8::99")["ok"]
+assert call(b"v1\trelease\tpeer\t01\t2001:db8::99")["ok"]
 PY
   client=$!
   i=0
