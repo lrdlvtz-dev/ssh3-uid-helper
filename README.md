@@ -5,6 +5,10 @@ create IPv6 TCP and UDP sockets with the identity of the authenticated CMXsafe
 account. This includes outbound ephemeral or explicitly bound source sockets
 and inbound service sockets.
 
+This CMXsafe fork is **Linux-only**. It depends on Linux network namespaces,
+Netlink, `SO_PEERCRED`, `SCM_RIGHTS`, and UID/GID semantics; macOS and BSD SSH3
+test matrices do not apply to this integration.
+
 The helper and its SSH3 adapter live in `src/`. The separately deployable
 endpoint daemon belongs under `endpoint/`; it is intentionally a distinct
 component and security boundary. A complete CMXsafe Mirror Socket requires
@@ -143,6 +147,14 @@ root and is additionally checked as UID 0 by the daemon.
 
 ## SSH3 integration
 
+`ssh3-uid-helper.patch` is the historical, identity-only adapter for SSH3 pull
+request #166. Applying it demonstrates gateway Identity Sockets, but does not
+produce the strict end-to-end Mirror Socket implementation. New deployments
+should use the coordinated
+[`lrdlvtz-dev/ssh3-cmxsafe`](https://github.com/lrdlvtz-dev/ssh3-cmxsafe) fork,
+which carries the versioned direct/reverse tuple wire format and endpointd
+lease integration exercised by `make test-mirror-e2e`.
+
 The patch is pinned and tested against:
 
 ```text
@@ -218,6 +230,32 @@ Run the pinned upstream integration test:
 ```
 
 The same operation is available as `make test-ssh3`.
+
+Run the strict Identity/Mirror Socket integration against the coordinated
+CMXsafe SSH3 fork:
+
+```bash
+make test-mirror-e2e
+```
+
+This target builds the helper, endpoint daemon and pinned SSH3 source in a
+disposable Docker image, then runs them in three isolated network namespaces.
+It proves at kernel level that a direct client ingress port is preserved by the
+gateway Identity Socket and observed by the final service together with the
+canonical identity IPv6. In the reverse direction it proves that the observed
+peer tuple becomes the endpoint Mirror Socket tuple, that concurrent channel
+leases keep the `/128` present until the final release, and that replies return
+without crossing channel payloads. An occupied Identity Socket port and a
+stopped endpoint daemon are both checked to fail closed.
+
+The default input is `ssh3-cmxsafe` commit
+`92eb43fe668758e79d7e4b8b0228b32a2ad00e5d`. Set `SSH3_CMXSAFE_REPO` to use a
+different local checkout and `SSH3_CMXSAFE_COMMIT` to select another immutable
+revision. Docker with privileged-container support is required; all network
+namespaces are created inside the disposable container and removed on exit.
+The Linux-only GitHub Actions workflow in `.github/workflows/mirror-e2e.yml`
+checks out that exact SSH3 revision and runs the same privileged-container test;
+there is deliberately no macOS or BSD matrix for these Linux kernel features.
 
 The historical IPv4/socket proof-of-concept programs, unauthenticated daemon
 v1, textual client and host-specific test orchestrator have been removed. The
