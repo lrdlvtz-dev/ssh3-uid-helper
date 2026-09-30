@@ -29,7 +29,8 @@ socket's owning group in production.
 
 ## Protocol v1
 
-Requests are ASCII and newline terminated:
+The canonical wire form used by SSH3 is ASCII, tab-separated and newline
+terminated:
 
 ```
 v1<TAB>ping
@@ -37,8 +38,9 @@ v1<TAB>ensure<TAB>peer<TAB>01a2<TAB>2001:db8::10
 v1<TAB>release<TAB>peer<TAB>01a2<TAB>2001:db8::10
 ```
 
-`<TAB>` above denotes one literal tab byte. Space separators and omission of
-the `v1` prefix are also accepted for compatibility with older clients. Scope
+`<TAB>` above denotes one literal tab byte. The current parser additionally
+accepts space separators and omission of the `v1` prefix as legacy
+compatibility syntax; clients should not generate those forms. Scope
 is either `peer` (the remote Identity Socket address mirrored locally) or
 `self`; leases in the two scopes are distinct. `lease_id` is 1–32 hexadecimal
 characters. Responses are single-line JSON
