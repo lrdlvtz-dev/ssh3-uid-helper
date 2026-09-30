@@ -1,0 +1,7 @@
+CMXsafe mirror-socket endpoint daemon
+Copyright 2026 University College Dublin
+
+Design and implementation work by David de Hoz Diego and Jules Morice.
+
+This endpoint component was derived from the CMXsafeMAC-IPv6 endpoint-helper
+prototype and substantially hardened for integration with SSH3.
