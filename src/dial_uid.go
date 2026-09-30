@@ -24,7 +24,8 @@ import (
 
 const (
 	helperMagic          = uint32(0x434d5848) // CMXH
-	helperVersion        = uint16(1)
+	helperVersion        = uint16(2)
+	helperLegacyVersion  = uint16(1)
 	helperRequestSize    = 40
 	helperReplySize      = 24
 	helperTimeout        = 6 * time.Second
@@ -117,9 +118,12 @@ func randomRequestID() (uint64, error) {
 	return binary.BigEndian.Uint64(bytes[:]), nil
 }
 
-func buildHelperRequest(uid uint32, network string, destination *net.UDPAddr) ([]byte, uint64, int, error) {
+func buildHelperRequest(uid uint32, network string, destination *net.UDPAddr, sourcePort int) ([]byte, uint64, int, error) {
 	if destination == nil || destination.Port < 1 || destination.Port > 65535 || destination.Zone != "" {
 		return nil, 0, 0, errors.New("destination must be an unscoped IPv6 address with a valid port")
+	}
+	if sourcePort != 0 && (sourcePort < helperMinServicePort || sourcePort > 65535) {
+		return nil, 0, 0, fmt.Errorf("source port must be zero or between %d and 65535", helperMinServicePort)
 	}
 	ip := destination.IP.To16()
 	if ip == nil || destination.IP.To4() != nil {
@@ -152,6 +156,7 @@ func buildHelperRequest(uid uint32, network string, destination *net.UDPAddr) ([
 	binary.BigEndian.PutUint64(request[8:16], requestID)
 	binary.BigEndian.PutUint32(request[16:20], uid)
 	binary.BigEndian.PutUint16(request[20:22], uint16(destination.Port))
+	binary.BigEndian.PutUint16(request[22:24], uint16(sourcePort))
 	copy(request[24:40], ip)
 	return request, requestID, socketType, nil
 }
@@ -300,8 +305,9 @@ func verifyReceivedFDUID(fd int, uid uint32) error {
 	return nil
 }
 
-func verifyIdentityConnection(connection net.Conn, source net.IP, destination *net.UDPAddr, socketType int) error {
+func verifyIdentityConnection(connection net.Conn, source net.IP, sourcePort int, destination *net.UDPAddr, socketType int) error {
 	var localIP net.IP
+	var localPort int
 	var remoteIP net.IP
 	var remotePort int
 	switch typed := connection.(type) {
@@ -310,6 +316,7 @@ func verifyIdentityConnection(connection net.Conn, source net.IP, destination *n
 			return errors.New("helper returned TCP for a non-TCP request")
 		}
 		localIP = typed.LocalAddr().(*net.TCPAddr).IP
+		localPort = typed.LocalAddr().(*net.TCPAddr).Port
 		remote := typed.RemoteAddr().(*net.TCPAddr)
 		remoteIP, remotePort = remote.IP, remote.Port
 	case *net.UDPConn:
@@ -317,6 +324,7 @@ func verifyIdentityConnection(connection net.Conn, source net.IP, destination *n
 			return errors.New("helper returned UDP for a non-UDP request")
 		}
 		localIP = typed.LocalAddr().(*net.UDPAddr).IP
+		localPort = typed.LocalAddr().(*net.UDPAddr).Port
 		remote := typed.RemoteAddr().(*net.UDPAddr)
 		remoteIP, remotePort = remote.IP, remote.Port
 	default:
@@ -324,6 +332,13 @@ func verifyIdentityConnection(connection net.Conn, source net.IP, destination *n
 	}
 	if !localIP.Equal(source) {
 		return fmt.Errorf("helper socket source mismatch: got %s, want %s", localIP, source)
+	}
+	if sourcePort == 0 {
+		if localPort < helperMinServicePort || localPort > 65535 {
+			return fmt.Errorf("helper socket assigned invalid ephemeral source port %d", localPort)
+		}
+	} else if localPort != sourcePort {
+		return fmt.Errorf("helper socket source port mismatch: got %d, want %d", localPort, sourcePort)
 	}
 	if !remoteIP.Equal(destination.IP) || remotePort != destination.Port {
 		return fmt.Errorf("helper socket destination mismatch: got [%s]:%d, want [%s]:%d",
@@ -409,12 +424,12 @@ func exchangeHelperRequest(request []byte, requestID uint64, passedFD int) (int,
 
 // dialIdentitySocket obtains a connected IPv6 TCP or UDP socket whose source
 // address and Unix ownership are derived from the authenticated UID.
-func dialIdentitySocket(uid uint32, network string, destination *net.UDPAddr) (net.Conn, error) {
+func dialIdentitySocket(uid uint32, network string, destination *net.UDPAddr, sourcePort int) (net.Conn, error) {
 	source, err := canonicalIPv6ForUID(uid)
 	if err != nil {
 		return nil, err
 	}
-	request, requestID, socketType, err := buildHelperRequest(uid, network, destination)
+	request, requestID, socketType, err := buildHelperRequest(uid, network, destination, sourcePort)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +451,7 @@ func dialIdentitySocket(uid uint32, network string, destination *net.UDPAddr) (n
 	if err != nil {
 		return nil, fmt.Errorf("convert helper descriptor: %w", err)
 	}
-	if err := verifyIdentityConnection(identityConnection, source, destination, socketType); err != nil {
+	if err := verifyIdentityConnection(identityConnection, source, sourcePort, destination, socketType); err != nil {
 		identityConnection.Close()
 		return nil, err
 	}
@@ -625,12 +640,19 @@ func bindIdentityUDP(uid uint32, requested *net.UDPAddr) (*net.UDPConn, error) {
 }
 
 func dialIdentityTCP(uid uint32, destination *net.TCPAddr) (*net.TCPConn, error) {
+	return dialIdentityTCPFrom(uid, 0, destination)
+}
+
+// dialIdentityTCPFrom requests a connected identity socket with a specific
+// unprivileged canonical source port. sourcePort zero preserves v1's
+// kernel-assigned ephemeral-port behaviour.
+func dialIdentityTCPFrom(uid uint32, sourcePort int, destination *net.TCPAddr) (*net.TCPConn, error) {
 	if destination == nil {
 		return nil, errors.New("nil TCP destination")
 	}
 	connection, err := dialIdentitySocket(uid, "tcp6", &net.UDPAddr{
 		IP: destination.IP, Port: destination.Port, Zone: destination.Zone,
-	})
+	}, sourcePort)
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +665,12 @@ func dialIdentityTCP(uid uint32, destination *net.TCPAddr) (*net.TCPConn, error)
 }
 
 func dialIdentityUDP(uid uint32, destination *net.UDPAddr) (*net.UDPConn, error) {
-	connection, err := dialIdentitySocket(uid, "udp6", destination)
+	return dialIdentityUDPFrom(uid, 0, destination)
+}
+
+// dialIdentityUDPFrom is the UDP counterpart of dialIdentityTCPFrom.
+func dialIdentityUDPFrom(uid uint32, sourcePort int, destination *net.UDPAddr) (*net.UDPConn, error) {
+	connection, err := dialIdentitySocket(uid, "udp6", destination, sourcePort)
 	if err != nil {
 		return nil, err
 	}

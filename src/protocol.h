@@ -5,7 +5,9 @@
 namespace cmxsafe::ssh3_helper {
 
 constexpr std::uint32_t kMagic = 0x434d5848U;  // "CMXH"
-constexpr std::uint16_t kVersion = 1;
+constexpr std::uint16_t kVersion1 = 1;
+constexpr std::uint16_t kVersion2 = 2;
+constexpr std::uint16_t kCurrentVersion = kVersion2;
 constexpr std::uint16_t kMinServicePort = 1024;
 
 enum class Operation : std::uint16_t {
@@ -40,6 +42,20 @@ struct RequestV1 {
     std::uint8_t destination_ipv6[16];
 };
 
+// Version 2 gives the word that was reserved in v1 an explicit meaning.  It
+// is the requested local/source port for CONNECT operations.  A zero value
+// retains v1's kernel-assigned ephemeral-port behaviour.
+struct RequestV2 {
+    std::uint32_t magic;
+    std::uint16_t version;
+    std::uint16_t operation;
+    std::uint64_t request_id;
+    std::uint32_t uid;
+    std::uint16_t destination_port;
+    std::uint16_t source_port;
+    std::uint8_t destination_ipv6[16];
+};
+
 struct ResponseV1 {
     std::uint32_t magic;
     std::uint16_t version;
@@ -51,6 +67,7 @@ struct ResponseV1 {
 #pragma pack(pop)
 
 static_assert(sizeof(RequestV1) == 40, "unexpected RequestV1 size");
+static_assert(sizeof(RequestV2) == 40, "unexpected RequestV2 size");
 static_assert(sizeof(ResponseV1) == 24, "unexpected ResponseV1 size");
 
 }  // namespace cmxsafe::ssh3_helper

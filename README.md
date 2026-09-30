@@ -1,8 +1,20 @@
-# CMXsafe SSH3 identity socket helper
+# CMXsafe SSH3 identity and mirror-socket components
 
 This repository contains the Linux privilege-separation helper used by SSH3 to
 create IPv6 TCP and UDP sockets with the identity of the authenticated CMXsafe
-account. This includes outbound ephemeral sockets and inbound service sockets.
+account. This includes outbound ephemeral or explicitly bound source sockets
+and inbound service sockets.
+
+The helper and its SSH3 adapter live in `src/`. The separately deployable
+endpoint daemon belongs under `endpoint/`; it is intentionally a distinct
+component and security boundary. A complete CMXsafe Mirror Socket requires
+that endpoint daemon as well as this gateway-side helper. The helper alone
+does **not** claim to implement an end-to-end Mirror Socket.
+
+The original helper was developed by Younes Douici during his CY Tech
+internship under David Hoz Diego's supervision. Subsequent CMXsafe integration
+and hardening retain that attribution in this README and the repository
+history.
 
 The helper is an L4 socket factory. It is **not** a policy engine and does not
 read, create, enable or disable CMXsafe Security Contexts. The external
@@ -18,7 +30,7 @@ authenticated UID
   -> local passwd entry
   -> canonical 32-hex username
   -> canonical source IPv6
-  -> bind(canonical IPv6, ephemeral or service port)
+  -> bind(canonical IPv6, ephemeral, requested source, or service port)
   -> connect(destination) or listen/receive
   -> SCM_RIGHTS back to SSH3
 ```
@@ -45,7 +57,10 @@ anti-routing barrier.
 ## IPC protocol
 
 SSH3 connects to `/run/ssh3-helper/helper.sock` using Unix `SOCK_SEQPACKET`.
-The fixed-size, network-byte-order v1 request contains:
+The fixed-size, network-byte-order protocol has two explicit wire versions.
+Version 1 remains accepted for compatibility and always requests a
+kernel-assigned ephemeral source port for outbound connections. Version 2
+contains:
 
 - magic and protocol version;
 - operation (`TCP_CONNECT`, `UDP_CONNECT`, `TCP_LISTEN`, `UDP_BIND` or
@@ -53,7 +68,16 @@ The fixed-size, network-byte-order v1 request contains:
 - random request identifier;
 - authenticated UID;
 - destination IPv6 and port for connections, or only the service port for a
-  listener/bind request.
+  listener/bind request;
+- a source port for `TCP_CONNECT` and `UDP_CONNECT` (zero asks the kernel for
+  an ephemeral port, as in v1).
+
+A non-zero v2 source port is restricted to `1024..65535`. Ports `1..1023`, a
+non-zero source-port word in v1, and a source port on a service operation are
+rejected before socket creation. The worker binds the canonical IPv6 and
+requested port only after dropping UID, GID and capabilities. If the tuple is
+already occupied, `bind()` fails and the request fails closed; the daemon does
+not fall back to another port or wildcard address.
 
 A service request cannot supply a bind address: those 16 request bytes must be
 zero and the daemon always binds the IPv6 derived from the UID. TCP listeners
@@ -98,9 +122,7 @@ The daemon is written in C++ and links only against the standard Linux C/C++
 runtime. The Go client uses `golang.org/x/sys/unix` and is copied into the
 pinned SSH3 source tree when building SSH3.
 
-The repository does not currently declare a software license. A distributable
-release remains blocked until the repository owner selects and adds one; this
-implementation does not guess that legal choice.
+The repository is licensed under Apache License 2.0. See `LICENSE`.
 
 ## Install
 
@@ -164,7 +186,8 @@ socket directly with `net.Dial*` or `net.Listen*` is a policy bypass.
 The permanent suite contains:
 
 - Go unit tests for encoding, IPv6-only validation, delayed `SCM_RIGHTS`
-  reception, peer authentication and returned-FD validation;
+  reception, peer authentication, v1/v2 encoding, source-port range checks,
+  and returned-FD ownership and local/remote endpoint validation;
 - static security assertions that exclude the `/tmp` endpoint, textual
   UID/GID protocol and IPv4 socket family;
 - a disposable privileged-container test that creates canonical client and
@@ -172,8 +195,9 @@ The permanent suite contains:
   canonical IPv6 endpoints and the UID observed by Netfilter;
 - a live patched-SSH3 E2E that moves traffic through direct and reverse TCP
   and UDP port forwardings while every server-side socket uses the helper;
-- malformed request, invalid identity, slow-client and worker-saturation
-  negative tests, including forged listener descriptors;
+- malformed request, invalid identity, privileged source port, occupied source
+  port, v1 reserved-field misuse, slow-client and worker-saturation negative
+  tests, including forged listener descriptors;
 - a clean checkout test that applies the patch and compiles the pinned SSH3
   server.
 
@@ -208,6 +232,8 @@ used to bypass the helper.
   substituted.
 - Service port already owned: the helper fails closed with `EADDRINUSE`; it
   never shares the protected port.
+- Requested outbound source port already owned: the helper fails closed with
+  `EADDRINUSE`; it never silently selects a different source port.
 - Missing Security Context: the socket may be created, but the external
   enforcer blocks its traffic.
 - Enforcer unhealthy: gateway readiness remains failed closed; the helper does

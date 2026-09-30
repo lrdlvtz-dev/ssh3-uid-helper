@@ -103,14 +103,18 @@ func TestValidateIdentityConnectionRejectsWrongDestination(t *testing.T) {
 	defer server.Close()
 	local := connection.LocalAddr().(*net.TCPAddr)
 	wrong := &net.UDPAddr{IP: net.ParseIP("::1"), Port: listener.Addr().(*net.TCPAddr).Port + 1}
-	if err := verifyIdentityConnection(connection, local.IP, wrong, unix.SOCK_STREAM); err == nil {
+	if err := verifyIdentityConnection(connection, local.IP, local.Port, wrong, unix.SOCK_STREAM); err == nil {
 		t.Fatal("descriptor connected to the wrong destination was accepted")
+	}
+	correct := &net.UDPAddr{IP: listener.Addr().(*net.TCPAddr).IP, Port: listener.Addr().(*net.TCPAddr).Port}
+	if err := verifyIdentityConnection(connection, local.IP, local.Port+1, correct, unix.SOCK_STREAM); err == nil {
+		t.Fatal("descriptor bound to the wrong source port was accepted")
 	}
 }
 
 func TestBuildHelperRequestTCP(t *testing.T) {
 	destination := &net.UDPAddr{IP: net.ParseIP("fd00::20"), Port: 443}
-	request, requestID, socketType, err := buildHelperRequest(1007, "tcp6", destination)
+	request, requestID, socketType, err := buildHelperRequest(1007, "tcp6", destination, 24001)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +133,9 @@ func TestBuildHelperRequestTCP(t *testing.T) {
 	if got := binary.BigEndian.Uint16(request[20:22]); got != 443 {
 		t.Fatalf("port=%d", got)
 	}
+	if got := binary.BigEndian.Uint16(request[22:24]); got != 24001 {
+		t.Fatalf("source port=%d", got)
+	}
 	if got := net.IP(request[24:40]); !got.Equal(destination.IP) {
 		t.Fatalf("destination=%s", got)
 	}
@@ -137,7 +144,7 @@ func TestBuildHelperRequestTCP(t *testing.T) {
 func TestBuildHelperRequestUDP(t *testing.T) {
 	request, _, socketType, err := buildHelperRequest(42, "udp6", &net.UDPAddr{
 		IP: net.ParseIP("2001:db8::53"), Port: 53,
-	})
+	}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,10 +228,40 @@ func TestBuildHelperRequestRejectsInvalidDestinations(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, _, _, err := buildHelperRequest(1, test.network, test.destination); err == nil {
+			if _, _, _, err := buildHelperRequest(1, test.network, test.destination, 0); err == nil {
 				t.Fatal("invalid request accepted")
 			}
 		})
+	}
+}
+
+func TestBuildHelperRequestRejectsPrivilegedOrOutOfRangeSourcePort(t *testing.T) {
+	destination := &net.UDPAddr{IP: net.ParseIP("fd00::20"), Port: 443}
+	for _, sourcePort := range []int{-1, 1, 443, 1023, 65536} {
+		if _, _, _, err := buildHelperRequest(1, "tcp6", destination, sourcePort); err == nil {
+			t.Fatalf("accepted invalid source port %d", sourcePort)
+		}
+	}
+	for _, sourcePort := range []int{0, 1024, 65535} {
+		request, _, _, err := buildHelperRequest(1, "tcp6", destination, sourcePort)
+		if err != nil {
+			t.Fatalf("rejected source port %d: %v", sourcePort, err)
+		}
+		if got := int(binary.BigEndian.Uint16(request[22:24])); got != sourcePort {
+			t.Fatalf("encoded source port=%d, want %d", got, sourcePort)
+		}
+	}
+}
+
+func TestProtocolV1ReservedWordRemainsZero(t *testing.T) {
+	request := make([]byte, helperRequestSize)
+	binary.BigEndian.PutUint32(request[0:4], helperMagic)
+	binary.BigEndian.PutUint16(request[4:6], helperLegacyVersion)
+	binary.BigEndian.PutUint16(request[6:8], helperOpTCP)
+	binary.BigEndian.PutUint16(request[20:22], 443)
+	copy(request[24:40], net.ParseIP("fd00::20").To16())
+	if got := binary.BigEndian.Uint16(request[22:24]); got != 0 {
+		t.Fatalf("v1 reserved word=%d, want zero", got)
 	}
 }
 
@@ -232,7 +269,7 @@ func FuzzBuildHelperRequest(f *testing.F) {
 	f.Add([]byte{0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, uint16(443), "tcp6")
 	f.Add([]byte{0x7f, 0, 0, 1}, uint16(53), "udp6")
 	f.Fuzz(func(t *testing.T, rawIP []byte, port uint16, network string) {
-		_, _, _, _ = buildHelperRequest(1000, network, &net.UDPAddr{IP: net.IP(rawIP), Port: int(port)})
+		_, _, _, _ = buildHelperRequest(1000, network, &net.UDPAddr{IP: net.IP(rawIP), Port: int(port)}, 0)
 	})
 }
 

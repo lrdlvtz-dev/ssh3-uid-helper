@@ -81,6 +81,7 @@ done
 
 python3 "$repo/tests/helper_client.py" tcp "$tmp_dir/helper.sock" "$identity_uid"
 python3 "$repo/tests/helper_client.py" udp "$tmp_dir/helper.sock" "$identity_uid"
+python3 "$repo/tests/helper_client.py" protocol-v2 "$tmp_dir/helper.sock" "$identity_uid"
 
 # Prove the UID Netfilter sees on every server-side port-forwarding socket.
 # Counters do not terminate evaluation; the following UID gates decide whether
