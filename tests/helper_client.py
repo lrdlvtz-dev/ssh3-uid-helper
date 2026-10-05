@@ -8,21 +8,24 @@ import sys
 import time
 
 MAGIC = 0x434D5848
-VERSION = 1
+VERSION = 2
+LEGACY_VERSION = 1
 REQUEST = struct.Struct("!IHHQIHH16s")
 RESPONSE = struct.Struct("!IHHQII")
 
 
-def exchange(path, uid, operation, destination, port, expected_status=0, hold=0):
+def exchange(path, uid, operation, destination, port, expected_status=0, hold=0,
+             source_port=0, version=VERSION, keep_socket=False):
+    requested_version = version
     request_id = 0x1122334455667788
     payload = REQUEST.pack(
         MAGIC,
-        VERSION,
+        version,
         operation,
         request_id,
         uid,
         port,
-        0,
+        source_port,
         ipaddress.IPv6Address(destination).packed,
     )
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -35,7 +38,7 @@ def exchange(path, uid, operation, destination, port, expected_status=0, hold=0)
     response, ancillary, flags, _ = connection.recvmsg(RESPONSE.size, socket.CMSG_SPACE(4))
     assert len(response) == RESPONSE.size and not flags, (len(response), flags)
     magic, version, status, reply_id, system_errno, reserved = RESPONSE.unpack(response)
-    assert magic == MAGIC and version == VERSION and reserved == 0
+    assert magic == MAGIC and version == requested_version and reserved == 0
     assert status == expected_status, (status, system_errno)
     if status != 0:
         assert not ancillary
@@ -51,12 +54,16 @@ def exchange(path, uid, operation, destination, port, expected_status=0, hold=0)
     expected_source = str(ipaddress.IPv6Address("fd00::10"))
     assert identity_socket.family == socket.AF_INET6
     assert identity_socket.getsockname()[0] == expected_source, identity_socket.getsockname()
+    if source_port:
+        assert identity_socket.getsockname()[1] == source_port, identity_socket.getsockname()
     peer = identity_socket.getpeername()
     assert peer[0] == str(ipaddress.IPv6Address(destination)) and peer[1] == port, peer
     assert os.fstat(fd).st_uid == uid, os.fstat(fd)
     message = b"cmxsafe-identity-test"
     identity_socket.sendall(message)
     assert identity_socket.recv(4096) == message
+    if keep_socket:
+        return identity_socket
     identity_socket.close()
 
 
@@ -96,14 +103,14 @@ def invalid_packets(path):
     wrong_magic[0] ^= 1
     cases.append((wrong_magic, 1))
     wrong_version = bytearray(valid)
-    wrong_version[5] = 2
+    wrong_version[5] = 3
     cases.append((wrong_version, 1))
     wrong_operation = bytearray(valid)
     wrong_operation[7] = 99
     cases.append((wrong_operation, 1))
-    wrong_reserved = bytearray(valid)
-    wrong_reserved[23] = 1
-    cases.append((wrong_reserved, 1))
+    privileged_source = bytearray(valid)
+    privileged_source[23] = 1
+    cases.append((privileged_source, 4))
     zero_port = bytearray(valid)
     zero_port[20:22] = b"\x00\x00"
     cases.append((zero_port, 4))
@@ -120,6 +127,47 @@ def invalid_packets(path):
     cases.append((accept_without_fd, 1))
     for payload, expected in cases:
         expect_raw_status(path, payload, expected)
+
+
+def protocol_versions_and_source_ports(path, uid):
+    # A genuine v1 packet retains the historical ephemeral-port behaviour.
+    exchange(path, uid, 1, "fd00::20", 18443, version=LEGACY_VERSION)
+
+    # v1's reserved word may not silently acquire v2 source-port semantics.
+    v1_with_source = REQUEST.pack(
+        MAGIC, LEGACY_VERSION, 1, 41, uid, 18443, 24001,
+        ipaddress.IPv6Address("fd00::20").packed,
+    )
+    expect_raw_status(path, v1_with_source, 1)
+
+    for port in (1, 443, 1023):
+        privileged = REQUEST.pack(
+            MAGIC, VERSION, 1, 42 + port, uid, 18443, port,
+            ipaddress.IPv6Address("fd00::20").packed,
+        )
+        expect_raw_status(path, privileged, 4)
+
+    tcp = exchange(path, uid, 1, "fd00::20", 18443,
+                   source_port=24001, keep_socket=True)
+    try:
+        conflict = REQUEST.pack(
+            MAGIC, VERSION, 1, 99, uid, 18443, 24001,
+            ipaddress.IPv6Address("fd00::20").packed,
+        )
+        expect_raw_status(path, conflict, 5)
+    finally:
+        tcp.close()
+
+    udp = exchange(path, uid, 2, "fd00::20", 15353,
+                   source_port=24002, keep_socket=True)
+    try:
+        conflict = REQUEST.pack(
+            MAGIC, VERSION, 2, 100, uid, 15353, 24002,
+            ipaddress.IPv6Address("fd00::20").packed,
+        )
+        expect_raw_status(path, conflict, 5)
+    finally:
+        udp.close()
 
 
 def service_conflicts(path, service_uid):
@@ -237,6 +285,8 @@ if __name__ == "__main__":
         service_conflicts(path, int(sys.argv[3]))
     elif command == "invalid-listener-fds":
         invalid_listener_fds(path, int(sys.argv[3]))
+    elif command == "protocol-v2":
+        protocol_versions_and_source_ports(path, int(sys.argv[3]))
     elif command == "unauthorized":
         unauthorized(path)
     else:

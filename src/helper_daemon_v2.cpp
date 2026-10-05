@@ -35,11 +35,14 @@ namespace {
 
 using cmxsafe::ssh3_helper::Operation;
 using cmxsafe::ssh3_helper::RequestV1;
+using cmxsafe::ssh3_helper::RequestV2;
 using cmxsafe::ssh3_helper::ResponseV1;
 using cmxsafe::ssh3_helper::Status;
 using cmxsafe::ssh3_helper::kMagic;
 using cmxsafe::ssh3_helper::kMinServicePort;
-using cmxsafe::ssh3_helper::kVersion;
+using cmxsafe::ssh3_helper::kCurrentVersion;
+using cmxsafe::ssh3_helper::kVersion1;
+using cmxsafe::ssh3_helper::kVersion2;
 
 struct Fd {
     int value = -1;
@@ -234,10 +237,11 @@ bool drop_privileges(const Identity &identity) {
            real_gid == identity.gid && effective_gid == identity.gid && saved_gid == identity.gid;
 }
 
-ResponseV1 make_response(Status status, std::uint64_t request_id, int system_errno) {
+ResponseV1 make_response(Status status, std::uint64_t request_id, int system_errno,
+                         std::uint16_t version = kCurrentVersion) {
     ResponseV1 response{};
     response.magic = htonl(kMagic);
-    response.version = htons(kVersion);
+    response.version = htons(version);
     response.status = htons(static_cast<std::uint16_t>(status));
     response.request_id = htobe64(request_id);
     response.system_errno = htonl(static_cast<std::uint32_t>(system_errno));
@@ -272,8 +276,9 @@ bool peer_is_authorized(int client_fd, uid_t allowed_uid) {
     return credentials.uid == allowed_uid;
 }
 
-Status receive_request(int client_fd, RequestV1 *request, std::uint64_t *request_id, Fd *received_fd) {
-    char packet[sizeof(RequestV1)]{};
+Status receive_request(int client_fd, RequestV2 *request, std::uint64_t *request_id,
+                       std::uint16_t *request_version, Fd *received_fd) {
+    char packet[sizeof(RequestV2)]{};
     char control[CMSG_SPACE(sizeof(int) * 2)]{};
     iovec iov{packet, sizeof(packet)};
     msghdr message{};
@@ -304,16 +309,18 @@ Status receive_request(int client_fd, RequestV1 *request, std::uint64_t *request
         std::memcpy(&passed_fd, CMSG_DATA(header), sizeof(passed_fd));
         incoming = Fd(passed_fd);
     }
-    if (received != static_cast<ssize_t>(sizeof(RequestV1)) ||
+    if (received != static_cast<ssize_t>(sizeof(RequestV2)) ||
         (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0 || !ancillary_valid) {
         return Status::kMalformed;
     }
     std::memcpy(request, packet, sizeof(*request));
     *request_id = be64toh(request->request_id);
-    if (ntohl(request->magic) != kMagic || ntohs(request->version) != kVersion ||
-        ntohs(request->reserved) != 0) {
+    const std::uint16_t version = ntohs(request->version);
+    if (ntohl(request->magic) != kMagic ||
+        (version != kVersion1 && version != kVersion2)) {
         return Status::kMalformed;
     }
+    *request_version = version;
     const auto operation = static_cast<Operation>(ntohs(request->operation));
     if (operation != Operation::kConnectTcp && operation != Operation::kConnectUdp &&
         operation != Operation::kListenTcp && operation != Operation::kBindUdp &&
@@ -331,6 +338,18 @@ Status receive_request(int client_fd, RequestV1 *request, std::uint64_t *request
                                    operation == Operation::kBindUdp ||
                                    operation == Operation::kAcceptTcp;
     if (service_operation && ntohs(request->destination_port) < kMinServicePort) {
+        return Status::kInvalidDestination;
+    }
+    const std::uint16_t source_port = ntohs(request->source_port);
+    if (version == kVersion1 && source_port != 0) {
+        // This word is reserved in v1 and must never acquire v2 semantics
+        // without the explicit protocol-version bump.
+        return Status::kMalformed;
+    }
+    if (service_operation && source_port != 0) {
+        return Status::kInvalidDestination;
+    }
+    if (!service_operation && source_port != 0 && source_port < kMinServicePort) {
         return Status::kInvalidDestination;
     }
     in6_addr destination{};
@@ -403,7 +422,7 @@ Fd accept_identity_socket(int listener_fd, int timeout_ms, int *error) {
     return accepted;
 }
 
-Fd create_identity_socket(const RequestV1 &request, const Identity &identity, int timeout_ms, int *error) {
+Fd create_identity_socket(const RequestV2 &request, const Identity &identity, int timeout_ms, int *error) {
     const auto operation = static_cast<Operation>(ntohs(request.operation));
     const bool tcp = operation == Operation::kConnectTcp || operation == Operation::kListenTcp;
     const bool connecting = operation == Operation::kConnectTcp || operation == Operation::kConnectUdp;
@@ -421,7 +440,9 @@ Fd create_identity_socket(const RequestV1 &request, const Identity &identity, in
     sockaddr_in6 source{};
     source.sin6_family = AF_INET6;
     source.sin6_addr = identity.source;
-    if (!connecting) {
+    if (connecting) {
+        source.sin6_port = request.source_port;
+    } else {
         source.sin6_port = request.destination_port;
         if (operation == Operation::kListenTcp) {
             int reuse = 1;
@@ -487,28 +508,29 @@ void handle_client(int client_fd, const Config &config) {
     } catch (...) {
         _exit(1);
     }
-    RequestV1 request{};
+    RequestV2 request{};
     std::uint64_t request_id = 0;
+    std::uint16_t request_version = kCurrentVersion;
     Fd supplied_socket;
-    Status status = receive_request(client_fd, &request, &request_id, &supplied_socket);
+    Status status = receive_request(client_fd, &request, &request_id, &request_version, &supplied_socket);
     if (status != Status::kOk) {
-        send_response(client_fd, make_response(status, request_id, EINVAL));
+        send_response(client_fd, make_response(status, request_id, EINVAL, request_version));
         _exit(1);
     }
     Identity identity;
     uid_t requested_uid = static_cast<uid_t>(ntohl(request.uid));
     if (!resolve_identity(requested_uid, &identity)) {
-        send_response(client_fd, make_response(Status::kInvalidIdentity, request_id, ENOENT));
+        send_response(client_fd, make_response(Status::kInvalidIdentity, request_id, ENOENT, request_version));
         _exit(1);
     }
     const auto operation = static_cast<Operation>(ntohs(request.operation));
     if (operation == Operation::kAcceptTcp &&
         !validate_listener(supplied_socket.value, identity, request.destination_port)) {
-        send_response(client_fd, make_response(Status::kInvalidSocket, request_id, EBADF));
+        send_response(client_fd, make_response(Status::kInvalidSocket, request_id, EBADF, request_version));
         _exit(1);
     }
     if (!drop_privileges(identity)) {
-        send_response(client_fd, make_response(Status::kInternal, request_id, EPERM));
+        send_response(client_fd, make_response(Status::kInternal, request_id, EPERM, request_version));
         _exit(1);
     }
     int socket_error = 0;
@@ -516,10 +538,10 @@ void handle_client(int client_fd, const Config &config) {
         ? accept_identity_socket(supplied_socket.value, config.connect_timeout_ms, &socket_error)
         : create_identity_socket(request, identity, config.connect_timeout_ms, &socket_error);
     if (!identity_socket) {
-        send_response(client_fd, make_response(Status::kSocketFailed, request_id, socket_error));
+        send_response(client_fd, make_response(Status::kSocketFailed, request_id, socket_error, request_version));
         _exit(1);
     }
-    if (!send_response(client_fd, make_response(Status::kOk, request_id, 0), identity_socket.value)) {
+    if (!send_response(client_fd, make_response(Status::kOk, request_id, 0, request_version), identity_socket.value)) {
         _exit(1);
     }
     _exit(0);

@@ -152,6 +152,40 @@ func TestRealDaemonTCPAndUDP(t *testing.T) {
 	}
 	serviceUDP.Close()
 
+	fixedTCP, err := dialIdentityTCPFrom(uint32(uid64), 24001, &net.TCPAddr{
+		IP: net.ParseIP("fd00::20"), Port: 19443,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixedTCP.Close()
+	assertSocketUID(t, fixedTCP, uint32(uid64))
+	if local := fixedTCP.LocalAddr().(*net.TCPAddr); !local.IP.Equal(net.ParseIP("fd00::10")) || local.Port != 24001 {
+		t.Fatalf("fixed TCP source=%s, want [fd00::10]:24001", local)
+	}
+	if _, err := dialIdentityTCPFrom(uint32(uid64), 24001, &net.TCPAddr{
+		IP: net.ParseIP("fd00::20"), Port: 19443,
+	}); err == nil {
+		t.Fatal("conflicting fixed TCP source port was accepted")
+	}
+
+	fixedUDP, err := dialIdentityUDPFrom(uint32(uid64), 24002, &net.UDPAddr{
+		IP: net.ParseIP("fd00::20"), Port: 16353,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixedUDP.Close()
+	assertSocketUID(t, fixedUDP, uint32(uid64))
+	if local := fixedUDP.LocalAddr().(*net.UDPAddr); !local.IP.Equal(net.ParseIP("fd00::10")) || local.Port != 24002 {
+		t.Fatalf("fixed UDP source=%s, want [fd00::10]:24002", local)
+	}
+	if _, err := dialIdentityUDPFrom(uint32(uid64), 24002, &net.UDPAddr{
+		IP: net.ParseIP("fd00::20"), Port: 16353,
+	}); err == nil {
+		t.Fatal("conflicting fixed UDP source port was accepted")
+	}
+
 	if err := <-tcpServiceDone; err != nil {
 		t.Fatal(err)
 	}

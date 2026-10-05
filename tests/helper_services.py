@@ -10,7 +10,7 @@ import sys
 import threading
 
 MAGIC = 0x434D5848
-VERSION = 1
+VERSION = 2
 REQUEST = struct.Struct("!IHHQIHH16s")
 RESPONSE = struct.Struct("!IHHQII")
 

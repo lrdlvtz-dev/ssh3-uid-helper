@@ -1,8 +1,24 @@
-# CMXsafe SSH3 identity socket helper
+# CMXsafe SSH3 identity and mirror-socket components
 
 This repository contains the Linux privilege-separation helper used by SSH3 to
 create IPv6 TCP and UDP sockets with the identity of the authenticated CMXsafe
-account. This includes outbound ephemeral sockets and inbound service sockets.
+account. This includes outbound ephemeral or explicitly bound source sockets
+and inbound service sockets.
+
+This CMXsafe fork is **Linux-only**. It depends on Linux network namespaces,
+Netlink, `SO_PEERCRED`, `SCM_RIGHTS`, and UID/GID semantics; macOS and BSD SSH3
+test matrices do not apply to this integration.
+
+The helper and its SSH3 adapter live in `src/`. The separately deployable
+endpoint daemon belongs under `endpoint/`; it is intentionally a distinct
+component and security boundary. A complete CMXsafe Mirror Socket requires
+that endpoint daemon as well as this gateway-side helper. The helper alone
+does **not** claim to implement an end-to-end Mirror Socket.
+
+The original helper was developed by Younes Douici during his CY Tech
+internship under David Hoz Diego's supervision. Subsequent CMXsafe integration
+and hardening retain that attribution in this README and the repository
+history.
 
 The helper is an L4 socket factory. It is **not** a policy engine and does not
 read, create, enable or disable CMXsafe Security Contexts. The external
@@ -18,7 +34,7 @@ authenticated UID
   -> local passwd entry
   -> canonical 32-hex username
   -> canonical source IPv6
-  -> bind(canonical IPv6, ephemeral or service port)
+  -> bind(canonical IPv6, ephemeral, requested source, or service port)
   -> connect(destination) or listen/receive
   -> SCM_RIGHTS back to SSH3
 ```
@@ -45,7 +61,10 @@ anti-routing barrier.
 ## IPC protocol
 
 SSH3 connects to `/run/ssh3-helper/helper.sock` using Unix `SOCK_SEQPACKET`.
-The fixed-size, network-byte-order v1 request contains:
+The fixed-size, network-byte-order protocol has two explicit wire versions.
+Version 1 remains accepted for compatibility and always requests a
+kernel-assigned ephemeral source port for outbound connections. Version 2
+contains:
 
 - magic and protocol version;
 - operation (`TCP_CONNECT`, `UDP_CONNECT`, `TCP_LISTEN`, `UDP_BIND` or
@@ -53,7 +72,16 @@ The fixed-size, network-byte-order v1 request contains:
 - random request identifier;
 - authenticated UID;
 - destination IPv6 and port for connections, or only the service port for a
-  listener/bind request.
+  listener/bind request;
+- a source port for `TCP_CONNECT` and `UDP_CONNECT` (zero asks the kernel for
+  an ephemeral port, as in v1).
+
+A non-zero v2 source port is restricted to `1024..65535`. Ports `1..1023`, a
+non-zero source-port word in v1, and a source port on a service operation are
+rejected before socket creation. The worker binds the canonical IPv6 and
+requested port only after dropping UID, GID and capabilities. If the tuple is
+already occupied, `bind()` fails and the request fails closed; the daemon does
+not fall back to another port or wildcard address.
 
 A service request cannot supply a bind address: those 16 request bytes must be
 zero and the daemon always binds the IPv6 derived from the UID. TCP listeners
@@ -98,9 +126,7 @@ The daemon is written in C++ and links only against the standard Linux C/C++
 runtime. The Go client uses `golang.org/x/sys/unix` and is copied into the
 pinned SSH3 source tree when building SSH3.
 
-The repository does not currently declare a software license. A distributable
-release remains blocked until the repository owner selects and adds one; this
-implementation does not guess that legal choice.
+The repository is licensed under Apache License 2.0. See `LICENSE`.
 
 ## Install
 
@@ -120,6 +146,14 @@ The socket is `0660 root:ssh3-helper`; the current SSH3 deployment calls it as
 root and is additionally checked as UID 0 by the daemon.
 
 ## SSH3 integration
+
+`ssh3-uid-helper.patch` is the historical, identity-only adapter for SSH3 pull
+request #166. Applying it demonstrates gateway Identity Sockets, but does not
+produce the strict end-to-end Mirror Socket implementation. New deployments
+should use the coordinated
+[`lrdlvtz-dev/ssh3-cmxsafe`](https://github.com/lrdlvtz-dev/ssh3-cmxsafe) fork,
+which carries the versioned direct/reverse tuple wire format and endpointd
+lease integration exercised by `make test-mirror-e2e`.
 
 The patch is pinned and tested against:
 
@@ -164,7 +198,8 @@ socket directly with `net.Dial*` or `net.Listen*` is a policy bypass.
 The permanent suite contains:
 
 - Go unit tests for encoding, IPv6-only validation, delayed `SCM_RIGHTS`
-  reception, peer authentication and returned-FD validation;
+  reception, peer authentication, v1/v2 encoding, source-port range checks,
+  and returned-FD ownership and local/remote endpoint validation;
 - static security assertions that exclude the `/tmp` endpoint, textual
   UID/GID protocol and IPv4 socket family;
 - a disposable privileged-container test that creates canonical client and
@@ -172,8 +207,9 @@ The permanent suite contains:
   canonical IPv6 endpoints and the UID observed by Netfilter;
 - a live patched-SSH3 E2E that moves traffic through direct and reverse TCP
   and UDP port forwardings while every server-side socket uses the helper;
-- malformed request, invalid identity, slow-client and worker-saturation
-  negative tests, including forged listener descriptors;
+- malformed request, invalid identity, privileged source port, occupied source
+  port, v1 reserved-field misuse, slow-client and worker-saturation negative
+  tests, including forged listener descriptors;
 - a clean checkout test that applies the patch and compiles the pinned SSH3
   server.
 
@@ -195,6 +231,32 @@ Run the pinned upstream integration test:
 
 The same operation is available as `make test-ssh3`.
 
+Run the strict Identity/Mirror Socket integration against the coordinated
+CMXsafe SSH3 fork:
+
+```bash
+make test-mirror-e2e
+```
+
+This target builds the helper, endpoint daemon and pinned SSH3 source in a
+disposable Docker image, then runs them in three isolated network namespaces.
+It proves at kernel level that a direct client ingress port is preserved by the
+gateway Identity Socket and observed by the final service together with the
+canonical identity IPv6. In the reverse direction it proves that the observed
+peer tuple becomes the endpoint Mirror Socket tuple, that concurrent channel
+leases keep the `/128` present until the final release, and that replies return
+without crossing channel payloads. An occupied Identity Socket port and a
+stopped endpoint daemon are both checked to fail closed.
+
+The default input is `ssh3-cmxsafe` commit
+`92eb43fe668758e79d7e4b8b0228b32a2ad00e5d`. Set `SSH3_CMXSAFE_REPO` to use a
+different local checkout and `SSH3_CMXSAFE_COMMIT` to select another immutable
+revision. Docker with privileged-container support is required; all network
+namespaces are created inside the disposable container and removed on exit.
+The Linux-only GitHub Actions workflow in `.github/workflows/mirror-e2e.yml`
+checks out that exact SSH3 revision and runs the same privileged-container test;
+there is deliberately no macOS or BSD matrix for these Linux kernel features.
+
 The historical IPv4/socket proof-of-concept programs, unauthenticated daemon
 v1, textual client and host-specific test orchestrator have been removed. The
 repository contains no alternative proxy socket factory that can be built or
@@ -208,6 +270,8 @@ used to bypass the helper.
   substituted.
 - Service port already owned: the helper fails closed with `EADDRINUSE`; it
   never shares the protected port.
+- Requested outbound source port already owned: the helper fails closed with
+  `EADDRINUSE`; it never silently selects a different source port.
 - Missing Security Context: the socket may be created, but the external
   enforcer blocks its traffic.
 - Enforcer unhealthy: gateway readiness remains failed closed; the helper does

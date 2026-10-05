@@ -6,7 +6,7 @@ DESTDIR ?=
 BUILD_DIR := build
 HELPER := $(BUILD_DIR)/cmxsafe-ssh3-helper
 
-.PHONY: all clean test test-kernel test-ssh3 install
+.PHONY: all clean test test-kernel test-ssh3 test-mirror-e2e install
 
 all: $(HELPER)
 
@@ -24,6 +24,9 @@ test-ssh3:
 test-kernel:
 	docker build -t cmxsafe-ssh3-helper-test -f tests/Dockerfile .
 	docker run --rm --privileged cmxsafe-ssh3-helper-test
+
+test-mirror-e2e:
+	tests/test-mirror-e2e.sh
 
 install: $(HELPER)
 	install -D -m 0755 $(HELPER) $(DESTDIR)$(PREFIX)/libexec/cmxsafe-ssh3-helper

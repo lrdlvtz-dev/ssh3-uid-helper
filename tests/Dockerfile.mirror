@@ -1,0 +1,18 @@
+FROM golang:1.23-bookworm
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential ca-certificates iproute2 openssh-client openssl passwd \
+      python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY helper/ /work/helper/
+COPY ssh3/ /work/ssh3/
+
+RUN make -C /work/helper all \
+ && make -C /work/helper/endpoint all \
+ && cd /work/ssh3 \
+ && go build -o /usr/local/bin/ssh3 ./cmd/ssh3 \
+ && go build -o /usr/local/bin/ssh3-server ./cmd/ssh3-server
+
+ENTRYPOINT ["/work/helper/tests/run-mirror-e2e.sh"]
