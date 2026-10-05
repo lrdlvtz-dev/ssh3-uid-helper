@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 ssh3_repo=${SSH3_CMXSAFE_REPO:-/root/.openclaw/workspace/projects/ssh3-cmxsafe}
 ssh3_commit=${SSH3_CMXSAFE_COMMIT:-92eb43fe668758e79d7e4b8b0228b32a2ad00e5d}
 image=${CMXSAFE_MIRROR_TEST_IMAGE:-cmxsafe-mirror-e2e:test}
