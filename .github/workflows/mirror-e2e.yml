@@ -13,18 +13,18 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out helper and endpoint daemon
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: helper
       - name: Check out the pinned CMXsafe SSH3 fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: lrdlvtz-dev/ssh3-cmxsafe
-          ref: 92eb43fe668758e79d7e4b8b0228b32a2ad00e5d
+          ref: 6af6213abba46a865d94d36ec33c0e5fb2bdb9d3
           path: ssh3-cmxsafe
       - name: Run privileged namespace E2E
         working-directory: helper
         env:
           SSH3_CMXSAFE_REPO: ${{ github.workspace }}/ssh3-cmxsafe
-          SSH3_CMXSAFE_COMMIT: 92eb43fe668758e79d7e4b8b0228b32a2ad00e5d
+          SSH3_CMXSAFE_COMMIT: 6af6213abba46a865d94d36ec33c0e5fb2bdb9d3
         run: tests/test-mirror-e2e.sh
