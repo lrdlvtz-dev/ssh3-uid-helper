@@ -128,6 +128,13 @@ pinned SSH3 source tree when building SSH3.
 
 The repository is licensed under Apache License 2.0. See `LICENSE`.
 
+CMXsafe helper releases are published only from `cmxsafe-helper-v*` tags.
+Each experimental prerelease contains static Linux `amd64` and `arm64`
+bundles, SHA-256 checksums, an SPDX SBOM, a component/capability manifest, a
+keyless Sigstore bundle, and GitHub build provenance. Consumers must pin the
+approved archive digest and helper protocol version; they must not build or
+download a mutable branch at runtime.
+
 ## Install
 
 Create the dedicated group, install the daemon and unit, then start it:
