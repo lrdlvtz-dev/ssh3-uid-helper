@@ -6,7 +6,7 @@ DESTDIR ?=
 BUILD_DIR := build
 HELPER := $(BUILD_DIR)/cmxsafe-ssh3-helper
 
-.PHONY: all clean test test-kernel test-ssh3 test-mirror-e2e install
+.PHONY: all clean test test-endpoint test-kernel test-ssh3 test-mirror-e2e install
 
 all: $(HELPER)
 
@@ -17,6 +17,10 @@ $(HELPER): src/helper_daemon_v2.cpp src/protocol.h
 test: $(HELPER)
 	go test src/dial_uid.go src/dial_uid_test.go src/dial_uid_integration_test.go
 	sh tests/test-static.sh
+	$(MAKE) test-endpoint
+
+test-endpoint:
+	$(MAKE) -C endpoint test
 
 test-ssh3:
 	sh tests/test-ssh3-integration.sh
@@ -35,3 +39,4 @@ install: $(HELPER)
 
 clean:
 	rm -rf $(BUILD_DIR)
+	$(MAKE) -C endpoint clean
