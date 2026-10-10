@@ -53,11 +53,14 @@ jobs:
         shell: bash
         run: |
           c++ -O2 -std=c++17 -Wall -Wextra -Werror -Wpedantic -o /tmp/cmxsafe-ssh3-helper src/helper_daemon_v2.cpp
+          cc -O2 -std=c17 -Wall -Wextra -Werror -Wpedantic -Wconversion -Wshadow -Wformat=2 \
+            -o /tmp/cmxsafe-endpointd endpoint/cmxsafe-endpointd.c
           go test -race src/dial_uid.go src/dial_uid_test.go src/dial_uid_integration_test.go
           go test -c -o /tmp/dial_uid.test src/dial_uid.go src/dial_uid_test.go src/dial_uid_integration_test.go
           go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck -mode=binary /tmp/dial_uid.test
           sh tests/test-static.sh
+          make -C endpoint test
           shellcheck scripts/*.sh tests/*.sh
 
       - name: Verify privileged helper and SSH3 integration
@@ -81,6 +84,7 @@ jobs:
             version="$VALIDATION_VERSION"
           fi
           ./scripts/build_cmxsafe_release.sh "$version" "$GITHUB_SHA" dist
+          ./tests/test-release-contract.sh dist
 
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@fffec3d851af758d56fee099cf3fbf8aa8779843 # v0.24.3
@@ -131,5 +135,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --prerelease \
-            --title "CMXsafe SSH3 UID helper ${GITHUB_REF_NAME#cmxsafe-helper-v}" \
-            --notes "Experimental CMXsafe SSH3 privilege-separation helper. Verify the Sigstore bundle, GitHub provenance, SBOM, and component manifest before use."
+            --title "CMXsafe SSH3 helper and endpoint daemon ${GITHUB_REF_NAME#cmxsafe-helper-v}" \
+            --notes "Experimental CMXsafe SSH3 privilege-separation helper and endpoint mirror-address daemon. Both dynamically link to glibc. Verify the Sigstore bundle, GitHub provenance, SBOM, and component manifest before use."

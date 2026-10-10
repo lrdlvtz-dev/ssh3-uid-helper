@@ -11,9 +11,12 @@ test matrices do not apply to this integration.
 
 The helper and its SSH3 adapter live in `src/`. The separately deployable
 endpoint daemon belongs under `endpoint/`; it is intentionally a distinct
-component and security boundary. A complete CMXsafe Mirror Socket requires
-that endpoint daemon as well as this gateway-side helper. The helper alone
-does **not** claim to implement an end-to-end Mirror Socket.
+process and security boundary. Signed release archives package both executables
+so consumers can pin one verified artifact, but they must still be installed
+and run in their respective gateway and endpoint roles. A complete CMXsafe
+Mirror Socket requires that endpoint daemon as well as this gateway-side
+helper. The helper alone does **not** claim to implement an end-to-end Mirror
+Socket.
 
 The original helper was developed by Younes Douici during his CY Tech
 internship under David Hoz Diego's supervision. Subsequent CMXsafe integration
@@ -129,11 +132,14 @@ pinned SSH3 source tree when building SSH3.
 The repository is licensed under Apache License 2.0. See `LICENSE`.
 
 CMXsafe helper releases are published only from `cmxsafe-helper-v*` tags.
-Each experimental prerelease contains static Linux `amd64` and `arm64`
-bundles, SHA-256 checksums, an SPDX SBOM, a component/capability manifest, a
-keyless Sigstore bundle, and GitHub build provenance. Consumers must pin the
-approved archive digest and helper protocol version; they must not build or
-download a mutable branch at runtime.
+Each experimental prerelease contains Linux `amd64` and `arm64` bundles with
+both `cmxsafe-ssh3-helper` and `cmxsafe-endpointd`, SHA-256 checksums, an SPDX
+SBOM, a component/capability manifest, a keyless Sigstore bundle, and GitHub
+build provenance. Both executables are hardened PIE binaries dynamically
+linked against glibc; the manifest records the supported minimum glibc rather
+than claiming static portability. Consumers must pin the approved archive
+digest and protocol capabilities; they must not build or download a mutable
+branch at runtime.
 
 ## Install
 
@@ -151,6 +157,12 @@ runs the daemon as root with only `CAP_SETUID` and `CAP_SETGID`, restricts it to
 Unix and IPv6 sockets, and applies filesystem, namespace and device hardening.
 The socket is `0660 root:ssh3-helper`; the current SSH3 deployment calls it as
 root and is additionally checked as UID 0 by the daemon.
+
+The signed archive also contains `cmxsafe-endpointd`, `ENDPOINTD.md`, and its
+NOTICE. Install that binary only on endpoint systems that participate in Mirror
+Sockets and follow `ENDPOINTD.md`; it requires a separately protected Unix
+socket directory and `CAP_NET_ADMIN` (or root). Co-packaging does not authorize
+running endpointd in the gateway helper's security context.
 
 ## SSH3 integration
 

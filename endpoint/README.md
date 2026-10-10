@@ -3,6 +3,10 @@
 `cmxsafe-endpointd` is the endpoint-side address manager used by an SSH3
 Mirror Socket integration. It places explicitly leased IPv6 `/128` addresses
 on a daemon-owned dummy interface. It is intentionally small and Linux-only.
+It is shipped alongside `cmxsafe-ssh3-helper` in signed CMXsafe release
+archives, while remaining a separately deployed process and security boundary.
+Release binaries are hardened PIE executables dynamically linked against glibc;
+they are not advertised as static binaries.
 
 ## Security model
 

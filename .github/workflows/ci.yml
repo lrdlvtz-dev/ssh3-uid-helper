@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-24.04
+    # Release-contract validation must use the same glibc baseline as the
+    # signed release workflow. The packager also rejects newer symbol ABIs.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -19,7 +21,9 @@ jobs:
       - name: Install validation tools
         run: sudo apt-get update && sudo apt-get install -y g++-aarch64-linux-gnu jq shellcheck
       - name: Build daemon
-        run: make all
+        run: |
+          make all
+          make -C endpoint all
       - name: Go client tests
         run: |
           go test -race src/dial_uid.go src/dial_uid_test.go src/dial_uid_integration_test.go
@@ -32,7 +36,9 @@ jobs:
       - name: Static and shell checks
         run: |
           sh tests/test-static.sh
+          make -C endpoint test
           shellcheck tests/*.sh
+          shellcheck scripts/*.sh
           python3 -m py_compile tests/helper_client.py tests/helper_services.py \
             tests/check_ssh3_forwarding.py tests/forwarding_echo.py \
             tests/forwarding_probe.py
@@ -41,9 +47,7 @@ jobs:
       - name: Validate CMXsafe release contract
         run: |
           ./scripts/build_cmxsafe_release.sh 0.1.0-test "$(git rev-parse HEAD)" "$RUNNER_TEMP/cmxsafe-release"
-          jq -e '.component == "ssh3-uid-helper" and .protocol.version == 2 and (.artifacts | length) == 2' \
-            "$RUNNER_TEMP/cmxsafe-release/cmxsafe-component.json"
-          (cd "$RUNNER_TEMP/cmxsafe-release" && sha256sum --check SHA256SUMS)
+          ./tests/test-release-contract.sh "$RUNNER_TEMP/cmxsafe-release"
       - name: Kernel and nftables integration
         run: |
           docker build -t cmxsafe-ssh3-helper-test -f tests/Dockerfile .
