@@ -83,8 +83,11 @@ A non-zero v2 source port is restricted to `1024..65535`. Ports `1..1023`, a
 non-zero source-port word in v1, and a source port on a service operation are
 rejected before socket creation. The worker binds the canonical IPv6 and
 requested port only after dropping UID, GID and capabilities. If the tuple is
-already occupied, `bind()` fails and the request fails closed; the daemon does
-not fall back to another port or wildcard address.
+being reused after a completed TCP connection, `TCP_CONNECT` enables
+`SO_REUSEADDR` and retries only `EADDRINUSE`/`EADDRNOTAVAIL` within the global
+connect timeout. An identical tuple that is still established times out and
+fails closed; the daemon never falls back to another port or wildcard address.
+UDP connects and service sockets retain their previous reuse behaviour.
 
 A service request cannot supply a bind address: those 16 request bytes must be
 zero and the daemon always binds the IPv6 derived from the UID. TCP listeners

@@ -59,8 +59,7 @@ def serve_tcp(path, listener, uid):
             continue
         with connection:
             assert os.fstat(connection.fileno()).st_uid == uid
-            data = connection.recv(4096)
-            if data:
+            while data := connection.recv(4096):
                 connection.sendall(data)
 
 

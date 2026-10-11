@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cctype>
 #include <climits>
 #include <cstdio>
@@ -91,6 +92,35 @@ struct Identity {
 };
 
 volatile sig_atomic_t g_active_children = 0;
+
+using SteadyClock = std::chrono::steady_clock;
+constexpr int kConnectRetryDelayMs = 10;
+
+bool retryable_tcp_tuple_error(int error) {
+    return error == EADDRINUSE || error == EADDRNOTAVAIL;
+}
+
+int remaining_timeout_ms(const SteadyClock::time_point &deadline) {
+    const auto remaining = deadline - SteadyClock::now();
+    if (remaining <= SteadyClock::duration::zero()) {
+        return 0;
+    }
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+    return milliseconds > 0 ? static_cast<int>(milliseconds) : 1;
+}
+
+bool wait_for_tcp_tuple_retry(const SteadyClock::time_point &deadline) {
+    const int remaining = remaining_timeout_ms(deadline);
+    if (remaining == 0) {
+        return false;
+    }
+    const int delay = remaining < kConnectRetryDelayMs ? remaining : kConnectRetryDelayMs;
+    int rc;
+    do {
+        rc = poll(nullptr, 0, delay);
+    } while (rc < 0 && errno == EINTR && remaining_timeout_ms(deadline) > 0);
+    return remaining_timeout_ms(deadline) > 0;
+}
 
 void reap_children(int) {
     int saved_errno = errno;
@@ -426,43 +456,99 @@ Fd create_identity_socket(const RequestV2 &request, const Identity &identity, in
     const auto operation = static_cast<Operation>(ntohs(request.operation));
     const bool tcp = operation == Operation::kConnectTcp || operation == Operation::kListenTcp;
     const bool connecting = operation == Operation::kConnectTcp || operation == Operation::kConnectUdp;
+    const bool reusable_tcp_connect = operation == Operation::kConnectTcp && request.source_port != 0;
+    const auto deadline = SteadyClock::now() + std::chrono::milliseconds(timeout_ms);
     int type = tcp ? SOCK_STREAM : SOCK_DGRAM;
-    Fd socket_fd(socket(AF_INET6, type | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
-    if (!socket_fd) {
-        *error = errno;
-        return {};
-    }
-    int enabled = 1;
-    if (setsockopt(socket_fd.value, IPPROTO_IPV6, IPV6_V6ONLY, &enabled, sizeof(enabled)) < 0) {
-        *error = errno;
-        return {};
-    }
-    sockaddr_in6 source{};
-    source.sin6_family = AF_INET6;
-    source.sin6_addr = identity.source;
-    if (connecting) {
-        source.sin6_port = request.source_port;
-    } else {
-        source.sin6_port = request.destination_port;
-        if (operation == Operation::kListenTcp) {
-            int reuse = 1;
-            if (setsockopt(socket_fd.value, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+    for (;;) {
+        Fd socket_fd(socket(AF_INET6, type | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+        if (!socket_fd) {
+            *error = errno;
+            return {};
+        }
+        int enabled = 1;
+        if (setsockopt(socket_fd.value, IPPROTO_IPV6, IPV6_V6ONLY, &enabled, sizeof(enabled)) < 0) {
+            *error = errno;
+            return {};
+        }
+        if (reusable_tcp_connect &&
+            setsockopt(socket_fd.value, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) < 0) {
+            *error = errno;
+            return {};
+        }
+        sockaddr_in6 source{};
+        source.sin6_family = AF_INET6;
+        source.sin6_addr = identity.source;
+        if (connecting) {
+            source.sin6_port = request.source_port;
+        } else {
+            source.sin6_port = request.destination_port;
+            if (operation == Operation::kListenTcp &&
+                setsockopt(socket_fd.value, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) < 0) {
                 *error = errno;
                 return {};
             }
         }
-    }
-    if (bind(socket_fd.value, reinterpret_cast<sockaddr *>(&source), sizeof(source)) < 0) {
-        *error = errno;
-        return {};
-    }
-    if (operation == Operation::kListenTcp) {
-        if (listen(socket_fd.value, 128) < 0) {
-            *error = errno;
+        if (bind(socket_fd.value, reinterpret_cast<sockaddr *>(&source), sizeof(source)) < 0) {
+            const int bind_error = errno;
+            if (reusable_tcp_connect && retryable_tcp_tuple_error(bind_error)) {
+                if (wait_for_tcp_tuple_retry(deadline)) {
+                    continue;
+                }
+                *error = ETIMEDOUT;
+                return {};
+            }
+            *error = bind_error;
             return {};
         }
-    }
-    if (!connecting) {
+        if (operation == Operation::kListenTcp) {
+            if (listen(socket_fd.value, 128) < 0) {
+                *error = errno;
+                return {};
+            }
+        }
+        if (!connecting) {
+            int flags = fcntl(socket_fd.value, F_GETFL, 0);
+            if (flags < 0 || fcntl(socket_fd.value, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+                *error = errno;
+                return {};
+            }
+            return socket_fd;
+        }
+        sockaddr_in6 destination{};
+        destination.sin6_family = AF_INET6;
+        destination.sin6_port = request.destination_port;
+        std::memcpy(&destination.sin6_addr, request.destination_ipv6, sizeof(destination.sin6_addr));
+        int rc = connect(socket_fd.value, reinterpret_cast<sockaddr *>(&destination), sizeof(destination));
+        int connect_error = rc < 0 ? errno : 0;
+        if (rc < 0 && connect_error == EINPROGRESS) {
+            pollfd descriptor{socket_fd.value, POLLOUT, 0};
+            const int poll_timeout = reusable_tcp_connect ? remaining_timeout_ms(deadline) : timeout_ms;
+            if (poll_timeout == 0) {
+                *error = ETIMEDOUT;
+                return {};
+            }
+            rc = poll(&descriptor, 1, poll_timeout);
+            if (rc <= 0) {
+                *error = rc == 0 ? ETIMEDOUT : errno;
+                return {};
+            }
+            socklen_t connect_error_size = sizeof(connect_error);
+            if (getsockopt(socket_fd.value, SOL_SOCKET, SO_ERROR, &connect_error, &connect_error_size) < 0) {
+                *error = errno;
+                return {};
+            }
+        }
+        if (connect_error != 0) {
+            if (reusable_tcp_connect && retryable_tcp_tuple_error(connect_error)) {
+                if (wait_for_tcp_tuple_retry(deadline)) {
+                    continue;
+                }
+                *error = ETIMEDOUT;
+                return {};
+            }
+            *error = connect_error;
+            return {};
+        }
         int flags = fcntl(socket_fd.value, F_GETFL, 0);
         if (flags < 0 || fcntl(socket_fd.value, F_SETFL, flags & ~O_NONBLOCK) < 0) {
             *error = errno;
@@ -470,36 +556,6 @@ Fd create_identity_socket(const RequestV2 &request, const Identity &identity, in
         }
         return socket_fd;
     }
-    sockaddr_in6 destination{};
-    destination.sin6_family = AF_INET6;
-    destination.sin6_port = request.destination_port;
-    std::memcpy(&destination.sin6_addr, request.destination_ipv6, sizeof(destination.sin6_addr));
-    int rc = connect(socket_fd.value, reinterpret_cast<sockaddr *>(&destination), sizeof(destination));
-    if (rc < 0 && errno != EINPROGRESS) {
-        *error = errno;
-        return {};
-    }
-    if (rc < 0) {
-        pollfd descriptor{socket_fd.value, POLLOUT, 0};
-        rc = poll(&descriptor, 1, timeout_ms);
-        if (rc <= 0) {
-            *error = rc == 0 ? ETIMEDOUT : errno;
-            return {};
-        }
-        int connect_error = 0;
-        socklen_t connect_error_size = sizeof(connect_error);
-        if (getsockopt(socket_fd.value, SOL_SOCKET, SO_ERROR, &connect_error, &connect_error_size) < 0 ||
-            connect_error != 0) {
-            *error = connect_error != 0 ? connect_error : errno;
-            return {};
-        }
-    }
-    int flags = fcntl(socket_fd.value, F_GETFL, 0);
-    if (flags < 0 || fcntl(socket_fd.value, F_SETFL, flags & ~O_NONBLOCK) < 0) {
-        *error = errno;
-        return {};
-    }
-    return socket_fd;
 }
 
 void handle_client(int client_fd, const Config &config) {
