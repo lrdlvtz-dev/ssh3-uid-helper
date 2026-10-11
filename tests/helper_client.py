@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import array
+import errno
 import ipaddress
 import os
 import socket
@@ -56,6 +57,8 @@ def exchange(path, uid, operation, destination, port, expected_status=0, hold=0,
     assert identity_socket.getsockname()[0] == expected_source, identity_socket.getsockname()
     if source_port:
         assert identity_socket.getsockname()[1] == source_port, identity_socket.getsockname()
+        expected_reuse = 1 if operation == 1 else 0
+        assert identity_socket.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == expected_reuse
     peer = identity_socket.getpeername()
     assert peer[0] == str(ipaddress.IPv6Address(destination)) and peer[1] == port, peer
     assert os.fstat(fd).st_uid == uid, os.fstat(fd)
@@ -168,6 +171,64 @@ def protocol_versions_and_source_ports(path, uid):
         expect_raw_status(path, conflict, 5)
     finally:
         udp.close()
+
+
+def fixed_tcp_tuple_reuse(path, uid):
+    source_port = 24003
+    for iteration in range(250):
+        try:
+            exchange(path, uid, 1, "fd00::20", 18443, source_port=source_port)
+        except Exception as exc:
+            raise AssertionError(f"fixed TCP tuple failed at iteration {iteration}") from exc
+
+    held = exchange(
+        path, uid, 1, "fd00::20", 18443,
+        source_port=24004, keep_socket=True,
+    )
+    try:
+        request_id = 0x4455667788990011
+        conflict = REQUEST.pack(
+            MAGIC, VERSION, 1, request_id, uid, 18443, 24004,
+            ipaddress.IPv6Address("fd00::20").packed,
+        )
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        connection.settimeout(5)
+        connection.connect(path)
+        started = time.monotonic()
+        connection.sendall(conflict)
+        response, ancillary, flags, _ = connection.recvmsg(
+            RESPONSE.size, socket.CMSG_SPACE(4)
+        )
+        elapsed = time.monotonic() - started
+        actual = RESPONSE.unpack(response)
+        assert len(response) == RESPONSE.size and not flags and not ancillary
+        assert actual[:4] == (MAGIC, VERSION, 5, request_id), actual
+        assert actual[4:] == (errno.ETIMEDOUT, 0), actual
+        assert 1.5 <= elapsed <= 3.5, elapsed
+
+        # The rejected duplicate must not disturb the established connection.
+        held.sendall(b"still-established")
+        assert held.recv(4096) == b"still-established"
+    finally:
+        held.close()
+
+    # An unrelated connect error must not consume the tuple-retry budget.
+    request_id = 0x4455667788990012
+    refused = REQUEST.pack(
+        MAGIC, VERSION, 1, request_id, uid, 18444, 24005,
+        ipaddress.IPv6Address("fd00::20").packed,
+    )
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    connection.settimeout(5)
+    connection.connect(path)
+    started = time.monotonic()
+    connection.sendall(refused)
+    response = connection.recv(RESPONSE.size)
+    elapsed = time.monotonic() - started
+    actual = RESPONSE.unpack(response)
+    assert actual[:4] == (MAGIC, VERSION, 5, request_id), actual
+    assert actual[4:] == (errno.ECONNREFUSED, 0), actual
+    assert elapsed < 0.75, elapsed
 
 
 def service_conflicts(path, service_uid):
@@ -287,6 +348,8 @@ if __name__ == "__main__":
         invalid_listener_fds(path, int(sys.argv[3]))
     elif command == "protocol-v2":
         protocol_versions_and_source_ports(path, int(sys.argv[3]))
+    elif command == "tcp-fixed-reuse":
+        fixed_tcp_tuple_reuse(path, int(sys.argv[3]))
     elif command == "unauthorized":
         unauthorized(path)
     else:
